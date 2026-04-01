@@ -179,6 +179,44 @@ func ResolveResourcePath(r *http.Request, cfg *Config) string {
 	return resolveResourcePath(r.URL.Path, basePath)
 }
 
+// ResolveBaseResourcePath extracts the base resource path from a full request path.
+// This is used for OAuth metadata URLs, which should point to the base resource path
+// (e.g., "/mcp") rather than the full endpoint path (e.g., "/mcp/v1/messages").
+// It returns one of the registered OAuth metadata route patterns.
+func ResolveBaseResourcePath(r *http.Request, cfg *Config) string {
+	fullPath := ResolveResourcePath(r, cfg)
+	basePath := ""
+	if cfg != nil {
+		basePath = normalizeBasePath(cfg.ResourcePath)
+	}
+
+	// If no base path is configured, default to /mcp
+	if basePath == "" {
+		basePath = "/mcp"
+	}
+
+	// Check if the path matches one of the registered patterns
+	for _, pattern := range routePatterns {
+		expectedPath := basePath
+		if pattern != "" {
+			expectedPath = basePath + pattern
+		}
+
+		// If the full path starts with this pattern, return it
+		if fullPath == expectedPath || strings.HasPrefix(fullPath, expectedPath+"/") {
+			return expectedPath
+		}
+	}
+
+	// If path is exactly the base path or starts with it, return the base path
+	if fullPath == basePath || strings.HasPrefix(fullPath, basePath+"/") {
+		return basePath
+	}
+
+	// Default to the base path
+	return basePath
+}
+
 // buildResourceURL constructs the full resource URL for OAuth metadata.
 func (h *AuthHandler) buildResourceURL(r *http.Request, resourcePath string) string {
 	host, scheme := GetEffectiveHostAndScheme(r, h.cfg)

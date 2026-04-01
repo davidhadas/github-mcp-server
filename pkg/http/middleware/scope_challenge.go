@@ -119,9 +119,8 @@ func WithScopeChallenge(oauthCfg *oauth.Config, scopeFetcher scopes.FetcherInter
 			requiredScopes := toolScopeInfo.GetRequiredScopesSlice()
 
 			// Build the resource metadata URL using the shared utility
-			// GetEffectiveResourcePath returns the original path (e.g., /mcp or /mcp/x/all)
-			// which is used to construct the well-known OAuth protected resource URL
-			resourcePath := oauth.ResolveResourcePath(r, oauthCfg)
+			// Use base resource path for OAuth metadata URL, not the full endpoint path
+			resourcePath := oauth.ResolveBaseResourcePath(r, oauthCfg)
 			resourceMetadataURL := oauth.BuildResourceMetadataURL(r, oauthCfg, resourcePath)
 
 			// Build recommended scopes: existing scopes + required scopes
