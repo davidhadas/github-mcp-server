@@ -195,14 +195,30 @@ func ResolveBaseResourcePath(r *http.Request, cfg *Config) string {
 		basePath = "/mcp"
 	}
 
-	// Check if the path matches one of the registered patterns
-	for _, pattern := range routePatterns {
-		expectedPath := basePath
-		if pattern != "" {
-			expectedPath = basePath + pattern
+	// Check for /x/{toolset} pattern (e.g., /mcp/x/repos)
+	if strings.HasPrefix(fullPath, basePath+"/x/") {
+		// Extract up to the toolset name: /mcp/x/repos
+		parts := strings.SplitN(strings.TrimPrefix(fullPath, basePath+"/x/"), "/", 2)
+		if len(parts) > 0 && parts[0] != "" {
+			return basePath + "/x/" + parts[0]
 		}
+	}
 
-		// If the full path starts with this pattern, return it
+	// Check for /x/{toolset}/readonly pattern
+	if strings.Contains(fullPath, "/x/") && strings.Contains(fullPath, "/readonly") {
+		// Extract up to /readonly: /mcp/x/repos/readonly
+		if idx := strings.Index(fullPath, "/readonly"); idx != -1 {
+			pathUpToReadonly := fullPath[:idx+len("/readonly")]
+			if strings.HasPrefix(pathUpToReadonly, basePath+"/x/") {
+				return pathUpToReadonly
+			}
+		}
+	}
+
+	// Check other patterns in order of specificity (longer patterns first)
+	specificPatterns := []string{"/readonly", "/insiders"}
+	for _, pattern := range specificPatterns {
+		expectedPath := basePath + pattern
 		if fullPath == expectedPath || strings.HasPrefix(fullPath, expectedPath+"/") {
 			return expectedPath
 		}

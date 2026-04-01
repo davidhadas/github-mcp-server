@@ -244,6 +244,115 @@ func TestResolveResourcePath(t *testing.T) {
 	}
 }
 
+func TestResolveBaseResourcePath(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		cfg          *Config
+		setupRequest func() *http.Request
+		expectedPath string
+	}{
+		{
+			name: "full endpoint path returns base /mcp",
+			cfg: &Config{
+				ResourcePath: "/mcp",
+			},
+			setupRequest: func() *http.Request {
+				return httptest.NewRequest(http.MethodGet, "/mcp/v1/messages", nil)
+			},
+			expectedPath: "/mcp",
+		},
+		{
+			name: "nested endpoint path returns base /mcp",
+			cfg: &Config{
+				ResourcePath: "/mcp",
+			},
+			setupRequest: func() *http.Request {
+				return httptest.NewRequest(http.MethodGet, "/mcp/v1/initialize", nil)
+			},
+			expectedPath: "/mcp",
+		},
+		{
+			name: "readonly path returns /mcp/readonly",
+			cfg: &Config{
+				ResourcePath: "/mcp",
+			},
+			setupRequest: func() *http.Request {
+				return httptest.NewRequest(http.MethodGet, "/mcp/readonly/v1/messages", nil)
+			},
+			expectedPath: "/mcp/readonly",
+		},
+		{
+			name: "insiders path returns /mcp/insiders",
+			cfg: &Config{
+				ResourcePath: "/mcp",
+			},
+			setupRequest: func() *http.Request {
+				return httptest.NewRequest(http.MethodGet, "/mcp/insiders/v1/messages", nil)
+			},
+			expectedPath: "/mcp/insiders",
+		},
+		{
+			name: "toolset path returns /mcp/x/repos",
+			cfg: &Config{
+				ResourcePath: "/mcp",
+			},
+			setupRequest: func() *http.Request {
+				return httptest.NewRequest(http.MethodGet, "/mcp/x/repos/v1/messages", nil)
+			},
+			expectedPath: "/mcp/x/repos",
+		},
+		{
+			name: "base path only returns base path",
+			cfg: &Config{
+				ResourcePath: "/mcp",
+			},
+			setupRequest: func() *http.Request {
+				return httptest.NewRequest(http.MethodGet, "/mcp", nil)
+			},
+			expectedPath: "/mcp",
+		},
+		{
+			name: "root path with no config returns /mcp",
+			cfg:  &Config{},
+			setupRequest: func() *http.Request {
+				return httptest.NewRequest(http.MethodGet, "/", nil)
+			},
+			expectedPath: "/mcp",
+		},
+		{
+			name: "custom base path with endpoint",
+			cfg: &Config{
+				ResourcePath: "/api",
+			},
+			setupRequest: func() *http.Request {
+				return httptest.NewRequest(http.MethodGet, "/api/v1/messages", nil)
+			},
+			expectedPath: "/api",
+		},
+		{
+			name: "no config defaults to /mcp for endpoint paths",
+			cfg:  nil,
+			setupRequest: func() *http.Request {
+				return httptest.NewRequest(http.MethodGet, "/v1/messages", nil)
+			},
+			expectedPath: "/mcp",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			req := tc.setupRequest()
+			path := ResolveBaseResourcePath(req, tc.cfg)
+
+			assert.Equal(t, tc.expectedPath, path)
+		})
+	}
+}
+
 func TestBuildResourceMetadataURL(t *testing.T) {
 	t.Parallel()
 
