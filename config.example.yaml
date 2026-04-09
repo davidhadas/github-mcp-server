@@ -1,0 +1,45 @@
+# GitHub MCP Server Configuration File
+# Copy this file to config.yaml and customize for your needs
+
+# Server Configuration
+port: 8084
+host: github.com
+base-url: https://your-server.com
+base-path: /mcp
+
+# OAuth Elicitation Configuration
+# These settings enable the OAuth authorization URL endpoint
+oauth-client-id: your-github-app-client-id
+oauth-redirect-uri: http://localhost:8184/callback
+oauth-scopes:
+  - repo
+  - user
+  - read:org
+
+# OAuth Demo Configuration (optional)
+# Enable these to run the integrated OAuth demo page
+# oauth-client-secret: your-github-app-client-secret
+# demo-page-path: ./oauth-demo.html
+
+# Security Settings
+scope-challenge: true
+lockdown-mode: false
+
+# Performance Settings
+content-window-size: 5000
+repo-access-cache-ttl: 5m
+
+# Feature Flags
+insiders: false
+
+# Logging
+log-level: info
+enable-command-logging: false
+
+# Toolsets (optional - leave empty to enable all)
+# toolsets:
+#   - issues
+#   - pull-requests
+#   - repositories
+
+# Made with Bob

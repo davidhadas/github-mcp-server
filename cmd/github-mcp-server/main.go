@@ -106,6 +106,15 @@ var (
 		Long:  `Start an HTTP server that listens for MCP requests over HTTP.`,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			ttl := viper.GetDuration("repo-access-cache-ttl")
+
+			// Parse OAuth scopes if provided
+			var oauthScopes []string
+			if viper.IsSet("oauth_scopes") {
+				if err := viper.UnmarshalKey("oauth_scopes", &oauthScopes); err != nil {
+					return fmt.Errorf("failed to unmarshal oauth-scopes: %w", err)
+				}
+			}
+
 			httpConfig := ghhttp.ServerConfig{
 				Version:              version,
 				Host:                 viper.GetString("host"),
@@ -119,6 +128,11 @@ var (
 				LockdownMode:         viper.GetBool("lockdown-mode"),
 				RepoAccessCacheTTL:   &ttl,
 				ScopeChallenge:       viper.GetBool("scope-challenge"),
+				OAuthClientID:        viper.GetString("oauth_client_id"),
+				OAuthRedirectURI:     viper.GetString("oauth_redirect_uri"),
+				OAuthScopes:          oauthScopes,
+				OAuthClientSecret:    viper.GetString("oauth_client_secret"),
+				DemoPagePath:         viper.GetString("demo_page_path"),
 			}
 
 			return ghhttp.RunHTTPServer(httpConfig)
@@ -154,6 +168,13 @@ func init() {
 	httpCmd.Flags().String("base-path", "", "Externally visible base path for the HTTP server (for OAuth resource metadata)")
 	httpCmd.Flags().Bool("scope-challenge", false, "Enable OAuth scope challenge responses")
 
+	// OAuth elicitation flags
+	httpCmd.Flags().String("oauth-client-id", "", "OAuth client ID for elicitation (enables auth/url endpoint)")
+	httpCmd.Flags().String("oauth-redirect-uri", "", "OAuth redirect URI for elicitation")
+	httpCmd.Flags().StringSlice("oauth-scopes", nil, "Default OAuth scopes for elicitation")
+	httpCmd.Flags().String("oauth-client-secret", "", "OAuth client secret for token exchange (optional, for demo/development)")
+	httpCmd.Flags().String("demo-page-path", "", "Path to demo HTML file to serve (optional)")
+
 	// Bind flag to viper
 	_ = viper.BindPFlag("toolsets", rootCmd.PersistentFlags().Lookup("toolsets"))
 	_ = viper.BindPFlag("tools", rootCmd.PersistentFlags().Lookup("tools"))
@@ -173,6 +194,18 @@ func init() {
 	_ = viper.BindPFlag("base-url", httpCmd.Flags().Lookup("base-url"))
 	_ = viper.BindPFlag("base-path", httpCmd.Flags().Lookup("base-path"))
 	_ = viper.BindPFlag("scope-challenge", httpCmd.Flags().Lookup("scope-challenge"))
+	_ = viper.BindPFlag("oauth_client_id", httpCmd.Flags().Lookup("oauth-client-id"))
+	_ = viper.BindPFlag("oauth_redirect_uri", httpCmd.Flags().Lookup("oauth-redirect-uri"))
+	_ = viper.BindPFlag("oauth_scopes", httpCmd.Flags().Lookup("oauth-scopes"))
+	_ = viper.BindPFlag("oauth_client_secret", httpCmd.Flags().Lookup("oauth-client-secret"))
+	_ = viper.BindPFlag("demo_page_path", httpCmd.Flags().Lookup("demo-page-path"))
+
+	// Bind environment variables for OAuth
+	_ = viper.BindEnv("oauth_client_id", "GITHUB_OAUTH_CLIENT_ID")
+	_ = viper.BindEnv("oauth_client_secret", "GITHUB_OAUTH_CLIENT_SECRET")
+	_ = viper.BindEnv("oauth_redirect_uri", "GITHUB_OAUTH_REDIRECT_URI")
+	_ = viper.BindEnv("oauth_scopes", "GITHUB_OAUTH_SCOPES")
+
 	// Add subcommands
 	rootCmd.AddCommand(stdioCmd)
 	rootCmd.AddCommand(httpCmd)
@@ -183,6 +216,22 @@ func initConfig() {
 	viper.SetEnvPrefix("github")
 	viper.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
 	viper.AutomaticEnv()
+
+	// Look for config file in multiple locations
+	viper.SetConfigName("config")                   // name of config file (without extension)
+	viper.SetConfigType("yaml")                     // REQUIRED if the config file does not have the extension in the name
+	viper.AddConfigPath(".")                        // look for config in the working directory
+	viper.AddConfigPath("$HOME/.github-mcp-server") // look for config in home directory
+	viper.AddConfigPath("/etc/github-mcp-server/")  // look for config in /etc
+
+	// Read config file if it exists (don't error if not found)
+	if err := viper.ReadInConfig(); err != nil {
+		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
+			// Config file was found but another error was produced
+			fmt.Fprintf(os.Stderr, "Error reading config file: %v\n", err)
+		}
+		// Config file not found; ignore error since we support env vars and flags
+	}
 }
 
 func main() {

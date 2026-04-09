@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/github/github-mcp-server/pkg/http/headers"
+	oauthpkg "github.com/github/github-mcp-server/pkg/oauth"
 	"github.com/github/github-mcp-server/pkg/utils"
 	"github.com/go-chi/chi/v5"
 	"github.com/modelcontextprotocol/go-sdk/auth"
@@ -49,12 +50,21 @@ type Config struct {
 	// This is used to restore the original path when a proxy strips a base path before forwarding.
 	// If empty, requests are treated as already using the external path.
 	ResourcePath string
+
+	// ElicitationConfig holds the OAuth elicitation configuration.
+	// When non-nil, the server will handle auth/url requests.
+	ElicitationConfig *oauthpkg.ElicitationConfig
+
+	// ClientSecret is the OAuth client secret for token exchange (optional, for demo/development).
+	// When set along with ElicitationConfig, enables the /oauth/exchange-token endpoint.
+	ClientSecret string
 }
 
 // AuthHandler handles OAuth-related HTTP endpoints.
 type AuthHandler struct {
-	cfg     *Config
-	apiHost utils.APIHostResolver
+	cfg            *Config
+	apiHost        utils.APIHostResolver
+	tokenExchanger *TokenExchangeHandler
 }
 
 // NewAuthHandler creates a new OAuth auth handler.
@@ -71,9 +81,23 @@ func NewAuthHandler(cfg *Config, apiHost utils.APIHostResolver) (*AuthHandler, e
 		}
 	}
 
+	// Create token exchanger if client secret is provided
+	var tokenExchanger *TokenExchangeHandler
+	if cfg.ElicitationConfig != nil && cfg.ClientSecret != "" {
+		// Use GitHub's token endpoint
+		tokenURL := "https://github.com/login/oauth/access_token"
+		tokenExchanger = NewTokenExchangeHandler(
+			cfg.ElicitationConfig.ClientID,
+			cfg.ClientSecret,
+			cfg.ElicitationConfig.RedirectURI,
+			tokenURL,
+		)
+	}
+
 	return &AuthHandler{
-		cfg:     cfg,
-		apiHost: apiHost,
+		cfg:            cfg,
+		apiHost:        apiHost,
+		tokenExchanger: tokenExchanger,
 	}, nil
 }
 
@@ -93,6 +117,30 @@ func (h *AuthHandler) RegisterRoutes(r chi.Router) {
 			path := OAuthProtectedResourcePrefix + route
 			r.Handle(path, h.metadataHandler())
 		}
+	}
+}
+
+// RegisterElicitationRoutes registers the OAuth elicitation routes if configured.
+func (h *AuthHandler) RegisterElicitationRoutes(r chi.Router) error {
+	if h.cfg.ElicitationConfig == nil {
+		return nil // Elicitation not configured
+	}
+
+	elicitationHandler, err := NewElicitationHandler(h.cfg.ElicitationConfig, h.apiHost)
+	if err != nil {
+		return fmt.Errorf("failed to create elicitation handler: %w", err)
+	}
+
+	// Register POST /auth/url endpoint
+	r.Post("/auth/url", elicitationHandler.HandleAuthURL)
+
+	return nil
+}
+
+// RegisterTokenExchangeRoute registers the token exchange endpoint if configured.
+func (h *AuthHandler) RegisterTokenExchangeRoute(r chi.Router) {
+	if h.tokenExchanger != nil {
+		r.Post("/oauth/exchange-token", h.tokenExchanger.HandleTokenExchange)
 	}
 }
 

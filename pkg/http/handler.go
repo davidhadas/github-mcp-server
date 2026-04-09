@@ -142,16 +142,16 @@ func (h *Handler) RegisterMiddleware(r chi.Router) {
 // URL-based values take precedence over header-based values
 func (h *Handler) RegisterRoutes(r chi.Router) {
 	// Base routes
-	r.Mount("/", h)
-	r.With(withReadonly).Mount("/readonly", h)
-	r.With(withInsiders).Mount("/insiders", h)
-	r.With(withReadonly, withInsiders).Mount("/readonly/insiders", h)
+	r.Mount("/mcp", h)
+	r.With(withReadonly).Mount("/mcp/readonly", h)
+	r.With(withInsiders).Mount("/mcp/insiders", h)
+	r.With(withReadonly, withInsiders).Mount("/mcp/readonly/insiders", h)
 
 	// Toolset routes
-	r.With(withToolset).Mount("/x/{toolset}", h)
-	r.With(withToolset, withReadonly).Mount("/x/{toolset}/readonly", h)
-	r.With(withToolset, withInsiders).Mount("/x/{toolset}/insiders", h)
-	r.With(withToolset, withReadonly, withInsiders).Mount("/x/{toolset}/readonly/insiders", h)
+	r.With(withToolset).Mount("/mcp/x/{toolset}", h)
+	r.With(withToolset, withReadonly).Mount("/mcp/x/{toolset}/readonly", h)
+	r.With(withToolset, withInsiders).Mount("/mcp/x/{toolset}/insiders", h)
+	r.With(withToolset, withReadonly, withInsiders).Mount("/mcp/x/{toolset}/readonly/insiders", h)
 }
 
 // withReadonly is middleware that sets readonly mode in the request context

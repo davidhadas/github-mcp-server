@@ -17,6 +17,7 @@ import (
 	"github.com/github/github-mcp-server/pkg/http/oauth"
 	"github.com/github/github-mcp-server/pkg/inventory"
 	"github.com/github/github-mcp-server/pkg/lockdown"
+	oauthpkg "github.com/github/github-mcp-server/pkg/oauth"
 	"github.com/github/github-mcp-server/pkg/observability"
 	"github.com/github/github-mcp-server/pkg/observability/metrics"
 	"github.com/github/github-mcp-server/pkg/scopes"
@@ -69,6 +70,22 @@ type ServerConfig struct {
 	// ScopeChallenge indicates if we should return OAuth scope challenges, and if we should perform
 	// tool filtering based on token scopes.
 	ScopeChallenge bool
+
+	// OAuth Elicitation Configuration
+	// OAuthClientID is the OAuth client ID for elicitation (enables auth/url endpoint when set)
+	OAuthClientID string
+
+	// OAuthRedirectURI is the OAuth redirect URI for elicitation
+	OAuthRedirectURI string
+
+	// OAuthScopes are the default OAuth scopes for elicitation
+	OAuthScopes []string
+
+	// OAuthClientSecret is the OAuth client secret for token exchange (optional, for demo/development)
+	OAuthClientSecret string
+
+	// DemoPagePath is the path to the demo HTML file to serve (optional)
+	DemoPagePath string
 }
 
 func RunHTTPServer(cfg ServerConfig) error {
@@ -130,10 +147,23 @@ func RunHTTPServer(cfg ServerConfig) error {
 		return fmt.Errorf("failed to initialize tool scope map: %w", err)
 	}
 
+	// Create OAuth elicitation config if client ID is provided
+	var elicitationCfg *oauthpkg.ElicitationConfig
+	if cfg.OAuthClientID != "" {
+		elicitationCfg = &oauthpkg.ElicitationConfig{
+			ClientID:    cfg.OAuthClientID,
+			RedirectURI: cfg.OAuthRedirectURI,
+			Scopes:      cfg.OAuthScopes,
+			// AuthorizationServer will be resolved from apiHost
+		}
+	}
+
 	// Register OAuth protected resource metadata endpoints
 	oauthCfg := &oauth.Config{
-		BaseURL:      cfg.BaseURL,
-		ResourcePath: cfg.ResourcePath,
+		BaseURL:           cfg.BaseURL,
+		ResourcePath:      cfg.ResourcePath,
+		ElicitationConfig: elicitationCfg,
+		ClientSecret:      cfg.OAuthClientSecret,
 	}
 
 	serverOptions := []HandlerOption{}
@@ -149,20 +179,49 @@ func RunHTTPServer(cfg ServerConfig) error {
 		return fmt.Errorf("failed to create OAuth handler: %w", err)
 	}
 
+	// Public routes (no authentication required) - register FIRST
 	r.Group(func(r chi.Router) {
-		// Register Middleware First, needs to be before route registration
-		handler.RegisterMiddleware(r)
+		// Serve demo page if configured
+		if cfg.DemoPagePath != "" {
+			r.Get("/demo", func(w http.ResponseWriter, r *http.Request) {
+				// Prevent browser caching of demo page
+				w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+				w.Header().Set("Pragma", "no-cache")
+				w.Header().Set("Expires", "0")
+				http.ServeFile(w, r, cfg.DemoPagePath)
+			})
+			r.Get("/callback", func(w http.ResponseWriter, r *http.Request) {
+				// Redirect callback to demo page with query params
+				http.Redirect(w, r, "/demo?"+r.URL.RawQuery, http.StatusFound)
+			})
+			r.Get("/", func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, "/demo", http.StatusFound)
+			})
+			logger.Info("Demo page registered", "path", cfg.DemoPagePath)
+		}
 
-		// Register MCP server routes
-		handler.RegisterRoutes(r)
-	})
-	logger.Info("MCP endpoints registered", "baseURL", cfg.BaseURL)
+		// Register OAuth elicitation endpoints if configured
+		if err := oauthHandler.RegisterElicitationRoutes(r); err != nil {
+			logger.Error("failed to register elicitation routes", "error", err)
+		}
 
-	r.Group(func(r chi.Router) {
+		// Register token exchange endpoint if configured
+		oauthHandler.RegisterTokenExchangeRoute(r)
+
 		// Register OAuth protected resource metadata endpoints
 		oauthHandler.RegisterRoutes(r)
 	})
 	logger.Info("OAuth protected resource endpoints registered", "baseURL", cfg.BaseURL)
+
+	// Protected routes (authentication required)
+	r.Group(func(r chi.Router) {
+		// Register Middleware First, needs to be before route registration
+		handler.RegisterMiddleware(r)
+
+		// Register MCP server routes (auth required)
+		handler.RegisterRoutes(r)
+	})
+	logger.Info("MCP endpoints registered", "baseURL", cfg.BaseURL)
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	httpSvr := http.Server{

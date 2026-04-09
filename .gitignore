@@ -1,6 +1,9 @@
 .idea
 cmd/github-mcp-server/github-mcp-server
 
+# Configuration files with secrets
+config.yaml
+
 # VSCode
 .vscode/*
 !.vscode/launch.json

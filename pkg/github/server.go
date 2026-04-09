@@ -10,6 +10,7 @@ import (
 
 	gherrors "github.com/github/github-mcp-server/pkg/errors"
 	"github.com/github/github-mcp-server/pkg/inventory"
+	"github.com/github/github-mcp-server/pkg/oauth"
 	"github.com/github/github-mcp-server/pkg/octicons"
 	"github.com/github/github-mcp-server/pkg/translations"
 	"github.com/github/github-mcp-server/pkg/utils"
@@ -71,6 +72,10 @@ type MCPServerConfig struct {
 	// When non-nil, tools requiring scopes not in this list will be hidden.
 	// This is used for PAT scope filtering where we can't issue scope challenges.
 	TokenScopes []string
+
+	// ElicitationConfig holds the OAuth configuration for MCP elicitation protocol.
+	// When non-nil, the server will handle auth/url requests and return authorization URLs.
+	ElicitationConfig *oauth.ElicitationConfig
 
 	// Additional server options to apply
 	ServerOptions []MCPServerOption
