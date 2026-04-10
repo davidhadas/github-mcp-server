@@ -15,6 +15,16 @@ if [ -f /tmp/authbridge-extension.pid ]; then
     fi
 fi
 
+# Stop AI Agent
+if [ -f /tmp/aiagent.pid ]; then
+    AIAGENT_PID=$(cat /tmp/aiagent.pid)
+    if kill -0 $AIAGENT_PID 2>/dev/null; then
+        echo "Stopping AI Agent (PID: $AIAGENT_PID)..."
+        kill $AIAGENT_PID
+        rm /tmp/aiagent.pid
+    fi
+fi
+
 # Stop MCP Server
 if [ -f /tmp/mcp-server-kagenti.pid ]; then
     MCP_PID=$(cat /tmp/mcp-server-kagenti.pid)
@@ -28,6 +38,7 @@ fi
 # Kill any remaining processes on these ports
 lsof -ti:8184 | xargs kill -9 2>/dev/null || true
 lsof -ti:8185 | xargs kill -9 2>/dev/null || true
+lsof -ti:8186 | xargs kill -9 2>/dev/null || true
 
 echo "✅ All services stopped"
 

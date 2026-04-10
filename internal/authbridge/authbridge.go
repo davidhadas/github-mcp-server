@@ -41,6 +41,14 @@ func init() {
 	}))
 }
 
+// PendingMCPRequest represents a blocked MCP request waiting for OAuth
+type PendingMCPRequest struct {
+	Request       aiagent.MCPRequest
+	ResponseChan  chan *aiagent.MCPResponse
+	ErrorChan     chan error
+	FrontendReady chan bool // Signal from ExecuteTaskViaHTTP that new frontend request arrived
+}
+
 // TokenCacheEntry represents a cached MCP token for a user
 type TokenCacheEntry struct {
 	Token     string
@@ -134,10 +142,11 @@ func (tc *TokenCache) ListUserTokens(userID string) []string {
 // AuthBridge handles authentication and token management
 // It implements the aiagent.AuthBridge interface and wraps AIAgent
 type AuthBridge struct {
-	tokenCache  *TokenCache
-	redirectURI string
-	agents      sync.Map // userID -> *aiagent.AIAgent
-	mu          sync.RWMutex
+	tokenCache      *TokenCache
+	redirectURI     string
+	agents          sync.Map // userID -> *aiagent.AIAgent
+	mu              sync.RWMutex
+	pendingRequests sync.Map // userID -> *PendingMCPRequest
 }
 
 // NewAuthBridge creates a new AuthBridge instance
@@ -382,6 +391,258 @@ func (ab *AuthBridge) HandleMCPRequest(req aiagent.MCPRequest) (*aiagent.MCPResp
 		Status: apiResp.StatusCode,
 		Body:   body,
 	}, nil
+}
+
+// HandleMCPProxyHTTP handles MCP requests from AI Agent via HTTP
+// This is the HTTP endpoint version of HandleMCPRequest
+// When auth is required, it BLOCKS the request until OAuth completes
+func (ab *AuthBridge) HandleMCPProxyHTTP(w http.ResponseWriter, r *http.Request) {
+	var mcpReq aiagent.MCPRequest
+	if err := json.NewDecoder(r.Body).Decode(&mcpReq); err != nil {
+		authBridgeLogger.Error("Invalid MCP request", "error", err.Error())
+		http.Error(w, fmt.Sprintf("Invalid request: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	authBridgeLogger.Info("← Received MCP request from AI Agent (HTTP)",
+		"user_id", mcpReq.UserID,
+		"method", mcpReq.Method)
+
+	// Use existing HandleMCPRequest logic
+	mcpResp, err := ab.HandleMCPRequest(mcpReq)
+	if err != nil {
+		// Check if this is an AuthRequiredError
+		if authErr, ok := err.(*AuthRequiredError); ok {
+			// BLOCK this request and wait for OAuth to complete
+			authBridgeLogger.Info("Auth required - blocking MCP request until OAuth completes",
+				"user_id", authErr.UserID)
+
+			// Create pending request with channels
+			pending := &PendingMCPRequest{
+				Request:       mcpReq,
+				ResponseChan:  make(chan *aiagent.MCPResponse, 1),
+				ErrorChan:     make(chan error, 1),
+				FrontendReady: make(chan bool, 1),
+			}
+
+			// Store pending request
+			ab.pendingRequests.Store(mcpReq.UserID, pending)
+
+			// Return AuthRequiredError to trigger OAuth redirect via Frontend Session
+			// But keep THIS session (MCP Request Session) open by not returning yet
+			authBridgeLogger.Info("→ Stored pending request, will trigger OAuth via ExecuteTaskViaHTTP",
+				"user_id", authErr.UserID)
+
+			// Signal that we need to return auth error to frontend
+			// This will be caught by ExecuteTaskViaHTTP
+			pending.ErrorChan <- err
+
+			// BLOCK and wait for either:
+			// 1. FrontendReady signal (new frontend request with token)
+			// 2. Timeout
+			authBridgeLogger.Info("⏸ Blocking MCP request, waiting for OAuth completion",
+				"user_id", mcpReq.UserID)
+
+			select {
+			case <-pending.FrontendReady:
+				// OAuth completed, retry the MCP request
+				authBridgeLogger.Info("▶ OAuth completed, retrying MCP request",
+					"user_id", mcpReq.UserID)
+
+				mcpResp, err = ab.HandleMCPRequest(mcpReq)
+				if err != nil {
+					authBridgeLogger.Error("MCP request failed after OAuth", "error", err.Error())
+					http.Error(w, fmt.Sprintf("MCP request failed: %v", err), http.StatusInternalServerError)
+					ab.pendingRequests.Delete(mcpReq.UserID)
+					return
+				}
+
+				// Send response back through channel
+				pending.ResponseChan <- mcpResp
+				ab.pendingRequests.Delete(mcpReq.UserID)
+
+			case <-time.After(5 * time.Minute):
+				// Timeout
+				authBridgeLogger.Error("OAuth timeout - MCP request abandoned",
+					"user_id", mcpReq.UserID)
+				ab.pendingRequests.Delete(mcpReq.UserID)
+				http.Error(w, "OAuth timeout", http.StatusRequestTimeout)
+				return
+			}
+		} else {
+			// Other error
+			authBridgeLogger.Error("MCP request failed", "error", err.Error())
+			http.Error(w, fmt.Sprintf("MCP request failed: %v", err), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	// Return successful MCP response
+	authBridgeLogger.Info("→ Returning MCP response to AI Agent",
+		"status", mcpResp.Status,
+		"body_size", len(mcpResp.Body))
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(mcpResp.Status)
+	w.Write(mcpResp.Body)
+}
+
+// ExecuteTaskViaHTTP executes a task by forwarding to AI Agent via HTTP
+// This replaces the in-process ExecuteTask when AI Agent is a separate service
+// It also handles OAuth redirects and resumes blocked MCP requests
+func (ab *AuthBridge) ExecuteTaskViaHTTP(taskReq aiagent.TaskRequest, aiAgentURL string) (*aiagent.TaskResponse, error) {
+	authBridgeLogger.Info("← Received task request from Backend",
+		"user_id", taskReq.UserID,
+		"task", taskReq.Task)
+
+	// Check if there's a pending MCP request for this user
+	if pendingVal, ok := ab.pendingRequests.Load(taskReq.UserID); ok {
+		pending := pendingVal.(*PendingMCPRequest)
+
+		// Check if this is a retry after OAuth (we have a token now)
+		if _, hasToken := ab.tokenCache.GetToken(taskReq.UserID, pending.Request.MCPServerURL); hasToken {
+			authBridgeLogger.Info("Token now available, resuming blocked MCP request",
+				"user_id", taskReq.UserID)
+
+			// Signal the blocked HandleMCPProxyHTTP to resume
+			pending.FrontendReady <- true
+
+			// Wait for the MCP response
+			select {
+			case mcpResp := <-pending.ResponseChan:
+				// Convert MCP response to task response
+				authBridgeLogger.Info("← Received MCP response from resumed request",
+					"user_id", taskReq.UserID,
+					"status", mcpResp.Status)
+
+				return &aiagent.TaskResponse{
+					Status:  "success",
+					Message: "Task completed after OAuth",
+					Result:  json.RawMessage(mcpResp.Body),
+				}, nil
+
+			case <-time.After(30 * time.Second):
+				authBridgeLogger.Error("Timeout waiting for resumed MCP response",
+					"user_id", taskReq.UserID)
+				ab.pendingRequests.Delete(taskReq.UserID)
+				return nil, fmt.Errorf("timeout waiting for MCP response")
+			}
+		}
+	}
+
+	// Forward task to AI Agent via HTTP
+	authBridgeLogger.Info("→ Forwarding task to AI Agent (HTTP)",
+		"user_id", taskReq.UserID,
+		"ai_agent_url", aiAgentURL)
+
+	reqBody, err := json.Marshal(taskReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal task request: %w", err)
+	}
+
+	// Start goroutine to forward to AI Agent
+	// This allows us to check for auth errors while AI Agent is processing
+	respChan := make(chan *http.Response, 1)
+	errChan := make(chan error, 1)
+
+	go func() {
+		resp, err := http.Post(aiAgentURL+"/task", "application/json", bytes.NewReader(reqBody))
+		if err != nil {
+			errChan <- err
+			return
+		}
+		respChan <- resp
+	}()
+
+	// Wait for either:
+	// 1. AI Agent response
+	// 2. Auth error from pending request
+	select {
+	case resp := <-respChan:
+		defer resp.Body.Close()
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read AI Agent response: %w", err)
+		}
+
+		var taskResp aiagent.TaskResponse
+		if err := json.Unmarshal(body, &taskResp); err != nil {
+			return nil, fmt.Errorf("failed to parse AI Agent response: %w", err)
+		}
+
+		authBridgeLogger.Info("← Received result from AI Agent (HTTP)",
+			"user_id", taskReq.UserID,
+			"status", taskResp.Status)
+
+		return &taskResp, nil
+
+	case err := <-errChan:
+		authBridgeLogger.Error("Failed to forward task to AI Agent",
+			"error", err.Error(),
+			"ai_agent_url", aiAgentURL)
+		return nil, fmt.Errorf("failed to forward task to AI Agent: %w", err)
+
+	case <-time.After(100 * time.Millisecond):
+		// Check if there's a pending auth error
+		if pendingVal, ok := ab.pendingRequests.Load(taskReq.UserID); ok {
+			pending := pendingVal.(*PendingMCPRequest)
+
+			select {
+			case authErr := <-pending.ErrorChan:
+				// Auth required - return to frontend for OAuth redirect
+				if authReqErr, ok := authErr.(*AuthRequiredError); ok {
+					authBridgeLogger.Info("← Caught AuthRequiredError, returning to Backend for OAuth redirect",
+						"user_id", authReqErr.UserID)
+
+					return &aiagent.TaskResponse{
+						Status:  "auth_required",
+						Message: "OAuth authentication needed",
+						Result: map[string]interface{}{
+							"error":         "authentication_required",
+							"error_message": "OAuth authentication needed",
+							"login_url":     authReqErr.AuthURL,
+							"code_verifier": authReqErr.CodeVerifier,
+							"user_id":       authReqErr.UserID,
+						},
+					}, nil
+				}
+			default:
+				// No auth error yet, continue waiting for AI Agent
+			}
+		}
+
+		// Continue waiting for AI Agent response
+		select {
+		case resp := <-respChan:
+			defer resp.Body.Close()
+
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read AI Agent response: %w", err)
+			}
+
+			var taskResp aiagent.TaskResponse
+			if err := json.Unmarshal(body, &taskResp); err != nil {
+				return nil, fmt.Errorf("failed to parse AI Agent response: %w", err)
+			}
+
+			authBridgeLogger.Info("← Received result from AI Agent (HTTP)",
+				"user_id", taskReq.UserID,
+				"status", taskResp.Status)
+
+			return &taskResp, nil
+
+		case err := <-errChan:
+			authBridgeLogger.Error("Failed to forward task to AI Agent",
+				"error", err.Error(),
+				"ai_agent_url", aiAgentURL)
+			return nil, fmt.Errorf("failed to forward task to AI Agent: %w", err)
+
+		case <-time.After(30 * time.Second):
+			return nil, fmt.Errorf("timeout waiting for AI Agent response")
+		}
+	}
 }
 
 // ExchangeToken exchanges an OAuth code for a token via the MCP server

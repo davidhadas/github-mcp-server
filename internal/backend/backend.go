@@ -39,6 +39,7 @@ type Config struct {
 	RedirectURI  string
 	MCPServers   []MCPServer
 	DemoPagePath string
+	AIAgentURL   string // URL of AI Agent service (e.g., "http://localhost:8186")
 }
 
 // Backend handles frontend requests and coordinates with AuthBridge
@@ -85,13 +86,24 @@ func (b *Backend) HandleTask(w http.ResponseWriter, r *http.Request) {
 		"user_id", taskReq.UserID,
 		"task", taskReq.Task)
 
-	// Always forward to AuthBridge → AIAgent
-	// Let AIAgent discover if OAuth is needed
+	// Forward to AuthBridge which will forward to AIAgent
 	backendLogger.Info("→ Forwarding task to AuthBridge",
 		"user_id", taskReq.UserID,
 		"task", taskReq.Task)
 
-	result, err := b.authBridge.ExecuteTask(taskReq)
+	var result *aiagent.TaskResponse
+	var err error
+
+	if b.config.AIAgentURL != "" {
+		// AI Agent is a separate process - use HTTP
+		backendLogger.Info("Using separate AI Agent process",
+			"ai_agent_url", b.config.AIAgentURL)
+		result, err = b.authBridge.ExecuteTaskViaHTTP(taskReq, b.config.AIAgentURL)
+	} else {
+		// AI Agent is in-process - use direct call
+		backendLogger.Info("Using in-process AI Agent")
+		result, err = b.authBridge.ExecuteTask(taskReq)
+	}
 
 	if err != nil {
 		backendLogger.Error("← AuthBridge returned error",

@@ -26,6 +26,7 @@ type Config struct {
 	RedirectURI  string      `mapstructure:"redirect_uri"`
 	MCPServers   []MCPServer `mapstructure:"mcp_servers"`
 	DemoPagePath string      `mapstructure:"demo_page_path"`
+	AIAgentURL   string      `mapstructure:"ai_agent_url"` // URL of separate AI Agent service
 }
 
 func main() {
@@ -71,6 +72,7 @@ func main() {
 		RedirectURI:  config.RedirectURI,
 		MCPServers:   backendMCPServers,
 		DemoPagePath: config.DemoPagePath,
+		AIAgentURL:   config.AIAgentURL,
 	}
 	backendService := backend.NewBackend(backendConfig, authBridge)
 
@@ -82,6 +84,9 @@ func main() {
 
 	// Task endpoint - Primary interface for browser
 	r.Post("/task", backendService.HandleTask)
+
+	// MCP Proxy endpoint - For AI Agent to make MCP requests
+	r.Post("/mcp", authBridge.HandleMCPProxyHTTP)
 
 	// OAuth endpoints
 	r.Post("/auth/url", backendService.HandleAuthURL)
@@ -114,7 +119,15 @@ func main() {
 
 	addr := fmt.Sprintf(":%d", config.Port)
 	log.Printf("KAgentI Service starting on port %d", config.Port)
-	log.Printf("Architecture: Browser → Backend → AIAgent → AuthBridge → MCP Server")
+
+	if config.AIAgentURL != "" {
+		log.Printf("Architecture: Browser → Backend → AuthBridge → AI Agent (HTTP: %s) → AuthBridge MCP Proxy → MCP Server", config.AIAgentURL)
+		log.Printf("AI Agent is a separate process")
+	} else {
+		log.Printf("Architecture: Browser → Backend → AuthBridge → AI Agent (in-process) → MCP Server")
+		log.Printf("AI Agent is in-process")
+	}
+
 	log.Printf("Logs: Backend (/tmp/backend.log), AuthBridge (/tmp/authbridge.log), AIAgent (/tmp/aiagent.log)")
 
 	if err := http.ListenAndServe(addr, r); err != nil {
