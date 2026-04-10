@@ -238,29 +238,33 @@
 </head>
 <body>
     <div class="container">
-        <h1>🔐 GitHub MCP Server OAuth Demo</h1>
-        <p class="subtitle">Hybrid Approach: Browser stores session, Server caches MCP tokens</p>
+        <h1>🤖 KAgentI AI Agent Demo</h1>
+        <p class="subtitle">Task-Based Architecture: Browser sends tasks, AI Agent orchestrates MCP calls</p>
         
         <div class="architecture">
             <div class="architecture-title">🏗️ KAgentI Architecture:</div>
             <div>Browser (this page) ← Stores Keycloak session token only</div>
-            <div>    ↓ HTTP + session token</div>
-            <div>OAuth Coordinator (port 8185) ← Caches MCP tokens per (user + server)</div>
+            <div>    ↓ POST /task (task description)</div>
+            <div>AuthBridge Extension (port 8185) ← Receives tasks</div>
+            <div>    ↓ Internal call</div>
+            <div>AI Agent ← Converts task to MCP request</div>
+            <div>    ↓ Internal call</div>
+            <div>AuthBridge ← Caches MCP tokens per (user + server)</div>
             <div>    ↓ MCP Protocol + Bearer token</div>
             <div>MCP Server (port 8184) ← OAuth discovery + token exchange</div>
         </div>
 
         <div class="hybrid-info">
-            <div class="hybrid-title">✨ Hybrid Approach Benefits:</div>
-            <div>• Browser: Only stores lightweight session token (simulated)</div>
-            <div>• Server: Caches all MCP tokens securely per user</div>
-            <div>• Automatic: Token management is transparent to user</div>
-            <div>• Secure: Multi-tenant isolation, server-side storage</div>
+            <div class="hybrid-title">✨ Task-Based Architecture Benefits:</div>
+            <div>• Browser: Sends natural language tasks, not MCP requests</div>
+            <div>• AI Agent: Converts tasks to appropriate MCP tool calls</div>
+            <div>• AuthBridge: Handles OAuth and token caching transparently</div>
+            <div>• Secure: Multi-tenant isolation, server-side token storage</div>
         </div>
         
         <div id="status" class="status info">
-            Ready to test MCP calls. Enter a user ID and try calling an MCP tool.<br>
-            <small style="margin-top: 8px; display: block;">⚠️ Make sure both OAuth Coordinator (8185) and MCP Server (8184) are running.</small>
+            Ready to submit agent tasks. Enter a user ID and describe what you want to do.<br>
+            <small style="margin-top: 8px; display: block;">⚠️ Make sure both AuthBridge Extension (8185) and MCP Server (8184) are running.</small>
         </div>
         
         <div class="section">
@@ -275,14 +279,14 @@
         </div>
         
         <div class="section">
-            <h2>Step 2: Make MCP Calls</h2>
-            <p style="margin-bottom: 15px;">Click a button to call an MCP tool. If no token is cached, you'll be automatically redirected to GitHub for authentication.</p>
+            <h2>Step 2: Submit Agent Tasks</h2>
+            <p style="margin-bottom: 15px;">Click a button to submit a task to the AI Agent. If no token is cached, you'll be automatically redirected to GitHub for authentication.</p>
             
-            <button onclick="callMCPTool('tools/list', {})">📋 List Available Tools</button>
-            <button onclick="callMCPTool('tools/call', {name: 'get_me', arguments: {}})">👤 Get My GitHub Info</button>
-            <button onclick="callMCPTool('tools/call', {name: 'list_repos', arguments: {}})">📚 List My Repositories</button>
+            <button onclick="submitTask('List all available GitHub tools')">📋 List Available Tools</button>
+            <button onclick="submitTask('Get my GitHub profile information')">👤 Get My GitHub Info</button>
+            <button onclick="submitTask('Show me all my GitHub repositories')">📚 List My Repositories</button>
             
-            <div id="mcpResult" style="margin-top: 20px;"></div>
+            <div id="taskResult" style="margin-top: 20px;"></div>
         </div>
 
         <div class="section">
@@ -296,13 +300,13 @@
 
     <script>
         const CONFIG = {
-            oauthCoordinatorUrl: 'http://localhost:8185',
+            authBridgeUrl: 'http://localhost:8185',
             mcpServerUrl: 'http://localhost:8184',
             redirectUri: 'http://localhost:8185/callback'
         };
 
         let pendingAuthData = null;
-        let pendingMCPRequest = null; // Store the original MCP request to retry after auth
+        let pendingTask = null; // Store the original task to retry after auth
         
         // Check if we're returning from GitHub OAuth
         window.addEventListener('load', async () => {
@@ -316,48 +320,46 @@
             }
         });
 
-        async function callMCPTool(method, params) {
+        async function submitTask(taskDescription) {
             const userId = document.getElementById('userId').value.trim();
             if (!userId) {
                 showStatus('error', 'Please enter a User ID');
                 return;
             }
 
-            const resultDiv = document.getElementById('mcpResult');
-            resultDiv.innerHTML = '<div class="loading"></div> Calling MCP tool...';
+            const resultDiv = document.getElementById('taskResult');
+            resultDiv.innerHTML = '<div class="loading"></div> Processing task...';
             
             try {
-                showStatus('info', `🔄 Calling MCP tool: ${method}...`);
+                showStatus('info', `🤖 Submitting task: "${taskDescription}"...`);
                 
-                const response = await fetch(CONFIG.oauthCoordinatorUrl + '/mcp/call', {
+                const response = await fetch(CONFIG.authBridgeUrl + '/task', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         user_id: userId,
                         mcp_server_url: CONFIG.mcpServerUrl,
-                        method: method,
-                        params: params
+                        task: taskDescription
                     })
                 });
                 
                 const data = await response.json();
                 
-                if (response.status === 401 && data.error === 'authentication_required') {
+                if (response.status === 401 && data.result && data.result.error === 'authentication_required') {
                     // No token cached - automatically redirect to GitHub
                     showStatus('info', '🔐 No token cached. Redirecting to GitHub for authentication...');
                     resultDiv.innerHTML = '<p style="color: #856404;">⚠️ Redirecting to GitHub...</p>';
                     
-                    // Store auth data AND the original MCP request (including user_id!) for retry after auth
-                    sessionStorage.setItem('pending_auth', JSON.stringify(data));
-                    sessionStorage.setItem('pending_mcp_request', JSON.stringify({
+                    // Store auth data AND the original task (including user_id!) for retry after auth
+                    sessionStorage.setItem('pending_auth', JSON.stringify(data.result));
+                    sessionStorage.setItem('pending_task', JSON.stringify({
                         user_id: userId,  // Store the user_id!
-                        method: method,
-                        params: params
+                        task: taskDescription
                     }));
                     
                     // Add prompt=select_account to force GitHub to show account selection/login
                     // This allows switching between different GitHub accounts for different user_ids
-                    let loginUrl = data.login_url;
+                    let loginUrl = data.result.login_url;
                     if (!loginUrl.includes('prompt=')) {
                         loginUrl += '&prompt=select_account';
                     }
@@ -367,16 +369,16 @@
                     }, 1000); // 1 second delay so user can see the message
                 } else if (response.ok) {
                     // Success!
-                    showStatus('success', `✅ MCP call successful! (Token was cached)`);
+                    showStatus('success', `✅ Task completed successfully! (Token was cached)`);
                     resultDiv.innerHTML = '<pre>' + JSON.stringify(data, null, 2) + '</pre>';
                 } else {
-                    throw new Error(data.error || 'MCP call failed');
+                    throw new Error(data.error || 'Task failed');
                 }
                 
             } catch (error) {
-                showStatus('error', `Failed to call MCP tool: ${error.message}`);
+                showStatus('error', `Failed to process task: ${error.message}`);
                 resultDiv.innerHTML = '<p style="color: #c62828;">❌ Error: ' + error.message + '</p>';
-                console.error('MCP call error:', error);
+                console.error('Task error:', error);
             }
         }
 
@@ -392,7 +394,7 @@
                 const authData = JSON.parse(authDataStr);
                 
                 // Exchange code for token (this will cache it server-side)
-                const response = await fetch(CONFIG.oauthCoordinatorUrl + '/oauth/exchange-token', {
+                const response = await fetch(CONFIG.authBridgeUrl + '/oauth/exchange-token', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -410,30 +412,30 @@
                 
                 const data = await response.json();
                 
-                if (data.access_token) {
+                if (data.success) {
                     sessionStorage.removeItem('pending_auth');
-                    showStatus('success', '✅ Successfully authenticated! Retrying your request...');
+                    showStatus('success', '✅ Successfully authenticated! Token cached. Retrying your task...');
                     
-                    // Check if there's a pending MCP request to retry
-                    const pendingRequestStr = sessionStorage.getItem('pending_mcp_request');
-                    if (pendingRequestStr) {
-                        const pendingRequest = JSON.parse(pendingRequestStr);
-                        sessionStorage.removeItem('pending_mcp_request');
+                    // Check if there's a pending task to retry
+                    const pendingTaskStr = sessionStorage.getItem('pending_task');
+                    if (pendingTaskStr) {
+                        const pendingTaskData = JSON.parse(pendingTaskStr);
+                        sessionStorage.removeItem('pending_task');
                         
                         // Restore the user_id in the input field
-                        if (pendingRequest.user_id) {
-                            document.getElementById('userId').value = pendingRequest.user_id;
+                        if (pendingTaskData.user_id) {
+                            document.getElementById('userId').value = pendingTaskData.user_id;
                         }
                         
-                        // Retry the original MCP request with the correct user_id
+                        // Retry the original task with the correct user_id
                         setTimeout(() => {
-                            callMCPTool(pendingRequest.method, pendingRequest.params);
+                            submitTask(pendingTaskData.task);
                         }, 500);
                     } else {
-                        // No pending request, just show success
+                        // No pending task, just show success
                         setTimeout(() => {
                             checkTokenCache();
-                            document.getElementById('mcpResult').innerHTML = '<p style="color: #28a745; padding: 15px; background: #e8f5e9; border-radius: 6px;">✅ Authentication complete! You can now use MCP tools.</p>';
+                            document.getElementById('taskResult').innerHTML = '<p style="color: #28a745; padding: 15px; background: #e8f5e9; border-radius: 6px;">✅ Authentication complete! You can now submit agent tasks.</p>';
                         }, 500);
                     }
                 } else {
@@ -457,7 +459,7 @@
             
             try {
                 const response = await fetch(
-                    `${CONFIG.oauthCoordinatorUrl}/tokens/status?user_id=${encodeURIComponent(userId)}`
+                    `${CONFIG.authBridgeUrl}/tokens/status?user_id=${encodeURIComponent(userId)}`
                 );
                 
                 if (!response.ok) {
@@ -501,7 +503,7 @@
             
             try {
                 const response = await fetch(
-                    `${CONFIG.oauthCoordinatorUrl}/tokens/${encodeURIComponent(userId)}/${encodeURIComponent(CONFIG.mcpServerUrl)}`,
+                    `${CONFIG.authBridgeUrl}/tokens/${encodeURIComponent(userId)}/${encodeURIComponent(CONFIG.mcpServerUrl)}`,
                     { method: 'DELETE' }
                 );
                 
@@ -509,13 +511,13 @@
                     throw new Error(`Failed to clear cache: ${response.status}`);
                 }
                 
-                showStatus('success', '✅ Token cache cleared. Click an MCP tool button to automatically re-authenticate.');
+                showStatus('success', '✅ Token cache cleared. Submit a task to automatically re-authenticate.');
                 document.getElementById('cacheStatus').innerHTML = '';
-                document.getElementById('mcpResult').innerHTML = `
+                document.getElementById('taskResult').innerHTML = `
                     <div style="background: #e3f2fd; padding: 15px; border-radius: 6px; border: 2px solid #1976d2;">
                         <p style="margin-bottom: 10px; font-weight: 600;">ℹ️ Token Cleared</p>
                         <p style="font-size: 14px;">
-                            Your cached token has been removed. Click any MCP tool button above and you'll be automatically redirected to GitHub for re-authentication.
+                            Your cached token has been removed. Submit any task above and you'll be automatically redirected to GitHub for re-authentication.
                         </p>
                     </div>
                 `;

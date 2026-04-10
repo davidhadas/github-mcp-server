@@ -38,10 +38,10 @@ echo $MCP_PID > /tmp/mcp-server-kagenti.pid
 echo "   ✅ MCP Server started (PID: $MCP_PID)"
 sleep 2
 
-# Start AuthBridge Extension (port 8185) - Provider-agnostic coordinator with AI Agent support
+# Start AuthBridge Extension (port 8185) - Provider-agnostic coordinator
 echo ""
 echo "2️⃣  Starting AuthBridge Extension (port 8185)..."
-echo "   Role: Provider-agnostic session coordinator with AI Agent support"
+echo "   Role: Provider-agnostic session coordinator"
 echo "   NO credentials, forwards OAuth ops to MCP servers"
 cd cmd/authbridge-extension
 ./authbridge-extension > /tmp/authbridge-extension.log 2>&1 &
@@ -49,7 +49,14 @@ AUTHBRIDGE_PID=$!
 echo $AUTHBRIDGE_PID > /tmp/authbridge-extension.pid
 cd ../..
 echo "   ✅ AuthBridge Extension started (PID: $AUTHBRIDGE_PID)"
-sleep 2
+sleep 1
+
+echo ""
+echo "3️⃣  AI Agent Component:"
+echo "   Role: Task orchestration and MCP request conversion"
+echo "   Runs within AuthBridge Extension process"
+echo "   ✅ AI Agent logging to separate file"
+sleep 1
 
 # Check if services are running
 echo ""
@@ -72,25 +79,27 @@ echo "✅ KAgentI Architecture Demo Started!"
 echo "======================================"
 echo ""
 echo "📊 Architecture:"
-echo "   Browser → AuthBridge Extension (8185) → MCP Server (8184)"
-echo "   AuthBridge wraps AI Agent interactions with MCP servers"
+echo "   Browser → Backend → AI Agent → AuthBridge → MCP Server (8184)"
+echo "   Separate packages: Backend (frontend), AuthBridge (auth), AIAgent (orchestration)"
 echo ""
 echo "🌐 Open in browser:"
 echo "   http://localhost:8185/demo"
 echo ""
-echo "📝 Logs:"
-echo "   MCP Server:          tail -f /tmp/mcp-server-kagenti.log"
-echo "   AuthBridge Extension: tail -f /tmp/authbridge-extension.log"
+echo "📝 Component Logs:"
+echo "   MCP Server:  tail -f /tmp/mcp-server-kagenti.log"
+echo "   Backend:     tail -f /tmp/backend.log"
+echo "   AuthBridge:  tail -f /tmp/authbridge.log"
+echo "   AI Agent:    tail -f /tmp/aiagent.log"
 echo ""
 echo "🛑 To stop:"
 echo "   ./stop-kagenti-demo.sh"
 echo ""
 echo "💡 Key Features:"
-echo "   - AuthBridge Extension is provider-agnostic (NO credentials)"
-echo "   - MCP Server handles token exchange (HAS client_secret)"
-echo "   - AuthBridge forwards all OAuth ops to MCP servers"
-echo "   - Includes AI Agent component for task orchestration"
-echo "   - Demonstrates KAgentI multi-tier architecture"
+echo "   - Task-based API: Browser sends natural language tasks"
+echo "   - AI Agent: Converts tasks to MCP requests (separate log)"
+echo "   - AuthBridge: Provider-agnostic OAuth coordination"
+echo "   - MCP Server: Handles token exchange (HAS client_secret)"
+echo "   - Separate logs for each component's perspective"
 echo ""
 
 # Made with Bob
