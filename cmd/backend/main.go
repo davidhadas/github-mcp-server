@@ -209,7 +209,9 @@ func handleTask(config *Config) http.HandlerFunc {
 		reqBody, err := json.Marshal(taskReq)
 		if err != nil {
 			backendLogger.Error("Failed to marshal task request", "error", err.Error())
-			http.Error(w, "Internal error", http.StatusInternalServerError)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Failed to marshal task request"})
 			return
 		}
 
@@ -226,14 +228,18 @@ func handleTask(config *Config) http.HandlerFunc {
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			backendLogger.Error("Failed to read AuthBridge response", "error", err.Error())
-			http.Error(w, "Internal error", http.StatusInternalServerError)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Failed to read response from AuthBridge"})
 			return
 		}
 
 		var taskResp aiagent.TaskResponse
 		if err := json.Unmarshal(body, &taskResp); err != nil {
 			backendLogger.Error("Failed to parse AuthBridge response", "error", err.Error())
-			http.Error(w, "Internal error", http.StatusInternalServerError)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Failed to parse response from AuthBridge"})
 			return
 		}
 

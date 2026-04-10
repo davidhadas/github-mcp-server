@@ -85,12 +85,11 @@ func TestElicitationConfig_Validate(t *testing.T) {
 			errorMsg:    "OAuth client ID is required",
 		},
 		{
-			name: "missing authorization server",
+			name: "missing authorization server is allowed (can be resolved at runtime)",
 			cfg: ElicitationConfig{
 				ClientID: "test-client-id",
 			},
-			expectError: true,
-			errorMsg:    "authorization server URL is required",
+			expectError: false,
 		},
 		{
 			name: "invalid authorization server URL",

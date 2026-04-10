@@ -28,7 +28,7 @@ type ElicitationConfig struct {
 // AuthURLRequest represents the MCP auth/url request parameters.
 type AuthURLRequest struct {
 	// CallbackURL is the client's callback URL for receiving the authorization code
-	CallbackURL string `json:"callbackUrl"`
+	CallbackURL string `json:"callback_url"`
 }
 
 // AuthURLResponse represents the MCP auth/url response.

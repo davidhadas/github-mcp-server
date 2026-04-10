@@ -169,7 +169,7 @@ func (ab *AuthBridge) HandleMCPRequest(req aiagent.MCPRequest) (*aiagent.MCPResp
 			"method", req.Method)
 
 		authURLReq := map[string]string{
-			"redirect_uri": ab.redirectURI,
+			"callback_url": ab.redirectURI,
 		}
 		jsonData, _ := json.Marshal(authURLReq)
 
@@ -284,7 +284,7 @@ func (ab *AuthBridge) HandleMCPRequest(req aiagent.MCPRequest) (*aiagent.MCPResp
 
 		// Get new auth URL
 		authURLReq := map[string]string{
-			"redirect_uri": ab.redirectURI,
+			"callback_url": ab.redirectURI,
 		}
 		jsonData, _ := json.Marshal(authURLReq)
 
@@ -621,7 +621,7 @@ func (ab *AuthBridge) GetAuthURL(mcpServerURL string) (string, string, error) {
 		"mcp_server", mcpServerURL)
 
 	authURLReq := map[string]string{
-		"redirect_uri": ab.redirectURI,
+		"callback_url": ab.redirectURI,
 	}
 	jsonData, _ := json.Marshal(authURLReq)
 

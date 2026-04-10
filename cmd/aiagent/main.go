@@ -210,6 +210,7 @@ func (agent *AIAgent) mcpResponseToTaskResult(mcpResp *MCPResponse, task TaskReq
 
 	// Build enhanced result with metadata
 	result := map[string]interface{}{
+		"session_id":        task.UserID,
 		"task_description":  task.Task,
 		"executed_by_user":  task.UserID,
 		"mcp_method":        mcpReq.Method,
@@ -221,6 +222,17 @@ func (agent *AIAgent) mcpResponseToTaskResult(mcpResp *MCPResponse, task TaskReq
 	if mcpReq.Method == "tools/call" {
 		if toolName, ok := mcpReq.Params["name"].(string); ok {
 			result["mcp_tool"] = toolName
+		}
+	}
+
+	// Extract GitHub login for get_me tool
+	if mcpReq.Method == "tools/call" {
+		if toolName, ok := mcpReq.Params["name"].(string); ok && toolName == "get_me" {
+			if resultMap, ok := formattedResult.(map[string]interface{}); ok {
+				if login, exists := resultMap["login"]; exists {
+					result["github_user"] = login
+				}
+			}
 		}
 	}
 
