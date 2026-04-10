@@ -22,7 +22,7 @@ type MCPServer struct {
 	URL  string `mapstructure:"url"`
 }
 
-// Config holds the OAuth coordinator configuration
+// Config holds the AuthBridge Extension configuration
 type Config struct {
 	Port         int         `mapstructure:"port"`
 	RedirectURI  string      `mapstructure:"redirect_uri"`
@@ -114,12 +114,97 @@ func (tc *TokenCache) ListUserTokens(userID string) []string {
 	return servers
 }
 
-// OAuthCoordinator manages OAuth flows for multiple providers
-type OAuthCoordinator struct {
+// AIAgent represents a KAgentI AI Agent that orchestrates tasks
+// This is a mock implementation that mimics how a real KAgentI agent would work
+type AIAgent struct {
+	authBridge *AuthBridgeExtension
+	userID     string
+	mu         sync.RWMutex
+}
+
+// NewAIAgent creates a new AI Agent instance
+func NewAIAgent(authBridge *AuthBridgeExtension, userID string) *AIAgent {
+	return &AIAgent{
+		authBridge: authBridge,
+		userID:     userID,
+	}
+}
+
+// ExecuteTask simulates an AI agent executing a task that requires MCP server interaction
+// This is where the agent would:
+// 1. Receive a user request
+// 2. Determine which MCP server(s) to use
+// 3. Make MCP requests through AuthBridge
+// 4. Handle OAuth elicitation if needed
+// 5. Retry after authentication
+// 6. Return results to user
+func (agent *AIAgent) ExecuteTask(taskDescription string, mcpServerURL string) (interface{}, error) {
+	slog.Info("AIAgent executing task", "user_id", agent.userID, "task", taskDescription, "mcp_server", mcpServerURL)
+
+	// This is a placeholder for actual agent logic
+	// In a real implementation, this would:
+	// - Parse the task description
+	// - Determine the appropriate MCP method and parameters
+	// - Call the MCP server through AuthBridge
+	// - Handle authentication flows
+	// - Process and return results
+
+	return map[string]interface{}{
+		"status":  "task_received",
+		"message": "AIAgent would process this task",
+		"task":    taskDescription,
+		"user_id": agent.userID,
+	}, nil
+}
+
+// RequestMCPOperation makes an MCP request through the AuthBridge
+// This simulates how an agent would interact with MCP servers
+func (agent *AIAgent) RequestMCPOperation(mcpServerURL, method string, params map[string]interface{}) (interface{}, error) {
+	slog.Info("AIAgent requesting MCP operation", "user_id", agent.userID, "mcp_server", mcpServerURL, "method", method)
+
+	// Check if we have a token cached
+	token, hasToken := agent.authBridge.tokenCache.GetToken(agent.userID, mcpServerURL)
+
+	if !hasToken {
+		// No token - need to trigger OAuth flow
+		slog.Info("AIAgent: No token available, OAuth flow needed", "user_id", agent.userID)
+		return nil, fmt.Errorf("authentication_required")
+	}
+
+	// Token available - proceed with MCP request
+	slog.Info("AIAgent: Token available, proceeding with MCP request", "user_id", agent.userID)
+
+	// This would make the actual MCP request
+	// For now, return a placeholder
+	return map[string]interface{}{
+		"status":       "success",
+		"message":      "MCP operation would be executed here",
+		"method":       method,
+		"has_token":    hasToken,
+		"token_prefix": token[:10] + "...",
+	}, nil
+}
+
+// AuthBridgeExtension manages OAuth flows and token caching for AI agents
+// It wraps agent interactions with MCP servers and handles authentication
+type AuthBridgeExtension struct {
 	config     *Config
 	sessions   sync.Map // sessionID -> Session
 	tokenCache *TokenCache
+	agents     sync.Map // userID -> *AIAgent
 	mu         sync.RWMutex
+}
+
+// GetOrCreateAgent returns an existing agent or creates a new one for the user
+func (abe *AuthBridgeExtension) GetOrCreateAgent(userID string) *AIAgent {
+	if agent, ok := abe.agents.Load(userID); ok {
+		return agent.(*AIAgent)
+	}
+
+	agent := NewAIAgent(abe, userID)
+	abe.agents.Store(userID, agent)
+	slog.Info("Created new AIAgent", "user_id", userID)
+	return agent
 }
 
 func main() {
@@ -127,7 +212,8 @@ func main() {
 	viper.SetConfigName("config")
 	viper.SetConfigType("yaml")
 	viper.AddConfigPath(".")
-	viper.AddConfigPath("./cmd/oauth-coordinator")
+	viper.AddConfigPath("./cmd/authbridge-extension")
+	viper.AddConfigPath("./cmd/oauth-coordinator") // Backward compatibility
 
 	if err := viper.ReadInConfig(); err != nil {
 		log.Fatalf("Error reading config file: %v", err)
@@ -146,7 +232,7 @@ func main() {
 		config.RedirectURI = fmt.Sprintf("http://localhost:%d/callback", config.Port)
 	}
 
-	coordinator := &OAuthCoordinator{
+	authBridge := &AuthBridgeExtension{
 		config:     &config,
 		tokenCache: NewTokenCache(),
 	}
@@ -158,16 +244,20 @@ func main() {
 	r.Use(corsMiddleware)
 
 	// OAuth endpoints
-	r.Post("/auth/url", coordinator.handleAuthURL)
-	r.Post("/oauth/exchange-token", coordinator.handleTokenExchange)
-	r.Get("/callback", coordinator.handleCallback)
+	r.Post("/auth/url", authBridge.handleAuthURL)
+	r.Post("/oauth/exchange-token", authBridge.handleTokenExchange)
+	r.Get("/callback", authBridge.handleCallback)
 
-	// Hybrid Approach: MCP call endpoint with token caching
-	r.Post("/mcp/call", coordinator.handleMCPCall)
+	// MCP call endpoint with token caching (for agents)
+	r.Post("/mcp/call", authBridge.handleMCPCall)
 
 	// Token cache management endpoints
-	r.Get("/tokens/status", coordinator.handleTokenStatus)
-	r.Delete("/tokens/{user_id}/{mcp_server}", coordinator.handleDeleteToken)
+	r.Get("/tokens/status", authBridge.handleTokenStatus)
+	r.Delete("/tokens/{user_id}/{mcp_server}", authBridge.handleDeleteToken)
+
+	// Agent management endpoints (new)
+	r.Post("/agent/task", authBridge.handleAgentTask)
+	r.Get("/agent/status", authBridge.handleAgentStatus)
 
 	// Serve demo page if configured
 	if config.DemoPagePath != "" {
@@ -187,7 +277,8 @@ func main() {
 	})
 
 	addr := fmt.Sprintf(":%d", config.Port)
-	slog.Info("OAuth Coordinator starting (provider-agnostic)", "port", config.Port, "redirect_uri", config.RedirectURI)
+	slog.Info("AuthBridge Extension starting", "port", config.Port, "redirect_uri", config.RedirectURI)
+	slog.Info("Provider-agnostic OAuth coordination with AI Agent support")
 	slog.Info("NO credentials stored - all OAuth operations delegated to MCP servers")
 	if err := http.ListenAndServe(addr, r); err != nil {
 		log.Fatalf("Server failed: %v", err)
@@ -198,7 +289,7 @@ func main() {
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
 		if r.Method == "OPTIONS" {
@@ -211,7 +302,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 }
 
 // handleAuthURL forwards the auth URL request to the MCP server
-func (c *OAuthCoordinator) handleAuthURL(w http.ResponseWriter, r *http.Request) {
+func (abe *AuthBridgeExtension) handleAuthURL(w http.ResponseWriter, r *http.Request) {
 	// Parse request
 	var req struct {
 		MCPServer   string `json:"mcp_server,omitempty"`
@@ -224,8 +315,8 @@ func (c *OAuthCoordinator) handleAuthURL(w http.ResponseWriter, r *http.Request)
 
 	// Get MCP server URL (use first configured if not specified)
 	mcpServerURL := req.MCPServer
-	if mcpServerURL == "" && len(c.config.MCPServers) > 0 {
-		mcpServerURL = c.config.MCPServers[0].URL
+	if mcpServerURL == "" && len(abe.config.MCPServers) > 0 {
+		mcpServerURL = abe.config.MCPServers[0].URL
 	}
 	if mcpServerURL == "" {
 		http.Error(w, "No MCP server configured", http.StatusBadRequest)
@@ -235,7 +326,7 @@ func (c *OAuthCoordinator) handleAuthURL(w http.ResponseWriter, r *http.Request)
 	// Use configured redirect URI if not provided
 	redirectURI := req.RedirectURI
 	if redirectURI == "" {
-		redirectURI = c.config.RedirectURI
+		redirectURI = abe.config.RedirectURI
 	}
 
 	// Forward request to MCP server
@@ -280,7 +371,7 @@ func (c *OAuthCoordinator) handleAuthURL(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	// Forward MCP server response to browser
+	// Forward MCP server response to client
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(mcpResp.StatusCode)
 	w.Write(body)
@@ -289,14 +380,14 @@ func (c *OAuthCoordinator) handleAuthURL(w http.ResponseWriter, r *http.Request)
 }
 
 // handleTokenExchange forwards the token exchange request to the MCP server
-// and caches the token for the Hybrid Approach
-func (c *OAuthCoordinator) handleTokenExchange(w http.ResponseWriter, r *http.Request) {
+// and caches the token
+func (abe *AuthBridgeExtension) handleTokenExchange(w http.ResponseWriter, r *http.Request) {
 	// Parse request
 	var req struct {
 		Code         string `json:"code"`
 		CodeVerifier string `json:"code_verifier"`
 		MCPServerURL string `json:"mcp_server_url,omitempty"`
-		UserID       string `json:"user_id,omitempty"` // For Hybrid Approach token caching
+		UserID       string `json:"user_id,omitempty"` // For token caching
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, fmt.Sprintf("Invalid request: %v", err), http.StatusBadRequest)
@@ -315,8 +406,8 @@ func (c *OAuthCoordinator) handleTokenExchange(w http.ResponseWriter, r *http.Re
 
 	// Get MCP server URL
 	mcpServerURL := req.MCPServerURL
-	if mcpServerURL == "" && len(c.config.MCPServers) > 0 {
-		mcpServerURL = c.config.MCPServers[0].URL
+	if mcpServerURL == "" && len(abe.config.MCPServers) > 0 {
+		mcpServerURL = abe.config.MCPServers[0].URL
 	}
 	if mcpServerURL == "" {
 		http.Error(w, "No MCP server specified", http.StatusBadRequest)
@@ -356,7 +447,7 @@ func (c *OAuthCoordinator) handleTokenExchange(w http.ResponseWriter, r *http.Re
 	} else {
 		slog.Info("Token exchange successful (handled by MCP server)")
 
-		// Hybrid Approach: Cache the token if user_id is provided
+		// Cache the token if user_id is provided
 		if req.UserID != "" {
 			var tokenResp struct {
 				AccessToken string `json:"access_token"`
@@ -368,20 +459,20 @@ func (c *OAuthCoordinator) handleTokenExchange(w http.ResponseWriter, r *http.Re
 				if expiresIn == 0 {
 					expiresIn = 3600
 				}
-				c.tokenCache.SetToken(req.UserID, mcpServerURL, tokenResp.AccessToken, expiresIn)
+				abe.tokenCache.SetToken(req.UserID, mcpServerURL, tokenResp.AccessToken, expiresIn)
 				slog.Info("Token cached for user", "user_id", req.UserID, "mcp_server", mcpServerURL, "expires_in", expiresIn)
 			}
 		}
 	}
 
-	// Forward MCP server response to browser
+	// Forward MCP server response to client
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(mcpResp.StatusCode)
 	w.Write(body)
 }
 
 // handleCallback handles OAuth callback (for browser-based flows)
-func (c *OAuthCoordinator) handleCallback(w http.ResponseWriter, r *http.Request) {
+func (abe *AuthBridgeExtension) handleCallback(w http.ResponseWriter, r *http.Request) {
 	code := r.URL.Query().Get("code")
 	state := r.URL.Query().Get("state")
 
@@ -395,8 +486,8 @@ func (c *OAuthCoordinator) handleCallback(w http.ResponseWriter, r *http.Request
 	http.Redirect(w, r, redirectURL, http.StatusFound)
 }
 
-// handleMCPCall handles MCP requests with automatic token management (Hybrid Approach)
-func (c *OAuthCoordinator) handleMCPCall(w http.ResponseWriter, r *http.Request) {
+// handleMCPCall handles MCP requests with automatic token management
+func (abe *AuthBridgeExtension) handleMCPCall(w http.ResponseWriter, r *http.Request) {
 	// Parse request
 	var req struct {
 		UserID       string                 `json:"user_id"`
@@ -424,7 +515,7 @@ func (c *OAuthCoordinator) handleMCPCall(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Check token cache
-	token, hasToken := c.tokenCache.GetToken(req.UserID, req.MCPServerURL)
+	token, hasToken := abe.tokenCache.GetToken(req.UserID, req.MCPServerURL)
 
 	if !hasToken {
 		// No token cached - return auth required response with login URL
@@ -432,7 +523,7 @@ func (c *OAuthCoordinator) handleMCPCall(w http.ResponseWriter, r *http.Request)
 
 		// Generate login URL via MCP server's auth/url endpoint
 		authURLReq := map[string]string{
-			"redirect_uri": c.config.RedirectURI,
+			"redirect_uri": abe.config.RedirectURI,
 		}
 		jsonData, _ := json.Marshal(authURLReq)
 
@@ -524,7 +615,7 @@ func (c *OAuthCoordinator) handleMCPCall(w http.ResponseWriter, r *http.Request)
 	httpReq, _ := http.NewRequest(apiMethod, apiURL, nil)
 	httpReq.Header.Set("Authorization", "Bearer "+token)
 	httpReq.Header.Set("Accept", "application/vnd.github.v3+json")
-	httpReq.Header.Set("User-Agent", "OAuth-Coordinator-Demo")
+	httpReq.Header.Set("User-Agent", "AuthBridge-Extension-Demo")
 
 	client := &http.Client{}
 	apiResp, err := client.Do(httpReq)
@@ -540,7 +631,7 @@ func (c *OAuthCoordinator) handleMCPCall(w http.ResponseWriter, r *http.Request)
 	// If 401, token might be expired - delete from cache
 	if apiResp.StatusCode == http.StatusUnauthorized {
 		slog.Info("Token expired, removing from cache", "user_id", req.UserID, "mcp_server", req.MCPServerURL)
-		c.tokenCache.DeleteToken(req.UserID, req.MCPServerURL)
+		abe.tokenCache.DeleteToken(req.UserID, req.MCPServerURL)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -549,7 +640,7 @@ func (c *OAuthCoordinator) handleMCPCall(w http.ResponseWriter, r *http.Request)
 }
 
 // handleTokenStatus returns the token cache status for debugging
-func (c *OAuthCoordinator) handleTokenStatus(w http.ResponseWriter, r *http.Request) {
+func (abe *AuthBridgeExtension) handleTokenStatus(w http.ResponseWriter, r *http.Request) {
 	userID := r.URL.Query().Get("user_id")
 
 	if userID == "" {
@@ -557,7 +648,7 @@ func (c *OAuthCoordinator) handleTokenStatus(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	servers := c.tokenCache.ListUserTokens(userID)
+	servers := abe.tokenCache.ListUserTokens(userID)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -568,7 +659,7 @@ func (c *OAuthCoordinator) handleTokenStatus(w http.ResponseWriter, r *http.Requ
 }
 
 // handleDeleteToken removes a token from the cache
-func (c *OAuthCoordinator) handleDeleteToken(w http.ResponseWriter, r *http.Request) {
+func (abe *AuthBridgeExtension) handleDeleteToken(w http.ResponseWriter, r *http.Request) {
 	userID := chi.URLParam(r, "user_id")
 	mcpServer := chi.URLParam(r, "mcp_server")
 
@@ -577,13 +668,65 @@ func (c *OAuthCoordinator) handleDeleteToken(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	c.tokenCache.DeleteToken(userID, mcpServer)
+	abe.tokenCache.DeleteToken(userID, mcpServer)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
 		"status":     "deleted",
 		"user_id":    userID,
 		"mcp_server": mcpServer,
+	})
+}
+
+// handleAgentTask handles task requests from clients to AI agents
+func (abe *AuthBridgeExtension) handleAgentTask(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		UserID       string `json:"user_id"`
+		Task         string `json:"task"`
+		MCPServerURL string `json:"mcp_server_url"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("Invalid request: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	if req.UserID == "" || req.Task == "" {
+		http.Error(w, "Missing user_id or task", http.StatusBadRequest)
+		return
+	}
+
+	// Get or create agent for this user
+	agent := abe.GetOrCreateAgent(req.UserID)
+
+	// Execute task through agent
+	result, err := agent.ExecuteTask(req.Task, req.MCPServerURL)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Agent task failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
+// handleAgentStatus returns the status of an agent
+func (abe *AuthBridgeExtension) handleAgentStatus(w http.ResponseWriter, r *http.Request) {
+	userID := r.URL.Query().Get("user_id")
+
+	if userID == "" {
+		http.Error(w, "Missing user_id parameter", http.StatusBadRequest)
+		return
+	}
+
+	// Check if agent exists
+	_, exists := abe.agents.Load(userID)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"user_id":      userID,
+		"agent_exists": exists,
+		"has_tokens":   len(abe.tokenCache.ListUserTokens(userID)) > 0,
 	})
 }
 

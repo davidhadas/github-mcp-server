@@ -5,13 +5,13 @@
 echo "🛑 Stopping KAgentI Architecture Demo"
 echo "======================================"
 
-# Stop OAuth Coordinator
-if [ -f /tmp/oauth-coordinator.pid ]; then
-    OAUTH_PID=$(cat /tmp/oauth-coordinator.pid)
-    if kill -0 $OAUTH_PID 2>/dev/null; then
-        echo "Stopping OAuth Coordinator (PID: $OAUTH_PID)..."
-        kill $OAUTH_PID
-        rm /tmp/oauth-coordinator.pid
+# Stop AuthBridge Extension
+if [ -f /tmp/authbridge-extension.pid ]; then
+    AUTHBRIDGE_PID=$(cat /tmp/authbridge-extension.pid)
+    if kill -0 $AUTHBRIDGE_PID 2>/dev/null; then
+        echo "Stopping AuthBridge Extension (PID: $AUTHBRIDGE_PID)..."
+        kill $AUTHBRIDGE_PID
+        rm /tmp/authbridge-extension.pid
     fi
 fi
 
