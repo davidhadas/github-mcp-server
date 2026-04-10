@@ -204,11 +204,12 @@ func (ab *AuthBridge) ExecuteTask(taskReq aiagent.TaskRequest) (*aiagent.TaskRes
 				Status:  "auth_required",
 				Message: "OAuth authentication needed",
 				Result: map[string]interface{}{
-					"error":         "authentication_required",
-					"error_message": "OAuth authentication needed",
-					"login_url":     authErr.AuthURL,
-					"code_verifier": authErr.CodeVerifier,
-					"user_id":       authErr.UserID,
+					"error":          "authentication_required",
+					"error_message":  "OAuth authentication needed",
+					"login_url":      authErr.AuthURL,
+					"code_verifier":  authErr.CodeVerifier,
+					"user_id":        authErr.UserID,
+					"mcp_server_url": taskReq.MCPServerURL,
 				},
 			}, nil
 		}
@@ -599,11 +600,12 @@ func (ab *AuthBridge) ExecuteTaskViaHTTP(taskReq aiagent.TaskRequest, aiAgentURL
 						Status:  "auth_required",
 						Message: "OAuth authentication needed",
 						Result: map[string]interface{}{
-							"error":         "authentication_required",
-							"error_message": "OAuth authentication needed",
-							"login_url":     authReqErr.AuthURL,
-							"code_verifier": authReqErr.CodeVerifier,
-							"user_id":       authReqErr.UserID,
+							"error":          "authentication_required",
+							"error_message":  "OAuth authentication needed",
+							"login_url":      authReqErr.AuthURL,
+							"code_verifier":  authReqErr.CodeVerifier,
+							"user_id":        authReqErr.UserID,
+							"mcp_server_url": taskReq.MCPServerURL,
 						},
 					}, nil
 				}

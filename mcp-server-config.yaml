@@ -1,0 +1,10 @@
+# MCP Server Configuration
+port: 8184
+
+# OAuth Configuration
+oauth:
+  client_id: "Ov23lipjfVegsSqldX5H"
+  client_secret: "751307b6ab9db77b4ff429e918db80b70770ed89"
+  redirect_uri: "http://localhost:8187/callback"
+
+# Made with Bob

@@ -242,14 +242,16 @@
         <p class="subtitle">Task-Based Architecture: Browser sends tasks, AI Agent orchestrates MCP calls</p>
         
         <div class="architecture">
-            <div class="architecture-title">🏗️ KAgentI Architecture:</div>
+            <div class="architecture-title">🏗️ KAgentI Architecture (4 Processes):</div>
             <div>Browser (this page) ← Stores Keycloak session token only</div>
             <div>    ↓ POST /task (task description)</div>
-            <div>AuthBridge Extension (port 8185) ← Receives tasks</div>
-            <div>    ↓ Internal call</div>
-            <div>AI Agent ← Converts task to MCP request</div>
-            <div>    ↓ Internal call</div>
-            <div>AuthBridge ← Caches MCP tokens per (user + server)</div>
+            <div>Backend (port 8187) ← Serves frontend, handles OAuth callbacks</div>
+            <div>    ↓ HTTP POST /task</div>
+            <div>AuthBridge (port 8185) ← OAuth coordination + token caching</div>
+            <div>    ↓ HTTP POST /task</div>
+            <div>AI Agent (port 8186) ← Converts task to MCP request</div>
+            <div>    ↓ HTTP POST /mcp</div>
+            <div>AuthBridge (port 8185) ← MCP proxy with token injection</div>
             <div>    ↓ MCP Protocol + Bearer token</div>
             <div>MCP Server (port 8184) ← OAuth discovery + token exchange</div>
         </div>
@@ -264,7 +266,7 @@
         
         <div id="status" class="status info">
             Ready to submit agent tasks. Enter a user ID and describe what you want to do.<br>
-            <small style="margin-top: 8px; display: block;">⚠️ Make sure both AuthBridge Extension (8185) and MCP Server (8184) are running.</small>
+            <small style="margin-top: 8px; display: block;">⚠️ Make sure all 4 services are running: Backend (8187), AuthBridge (8185), AI Agent (8186), MCP Server (8184).</small>
         </div>
         
         <div class="section">
@@ -300,9 +302,10 @@
 
     <script>
         const CONFIG = {
+            backendUrl: 'http://localhost:8187',
             authBridgeUrl: 'http://localhost:8185',
             mcpServerUrl: 'http://localhost:8184',
-            redirectUri: 'http://localhost:8185/callback'
+            redirectUri: 'http://localhost:8187/callback'
         };
 
         let pendingAuthData = null;
@@ -333,7 +336,7 @@
             try {
                 showStatus('info', `🤖 Submitting task: "${taskDescription}"...`);
                 
-                const response = await fetch(CONFIG.authBridgeUrl + '/task', {
+                const response = await fetch(CONFIG.backendUrl + '/task', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -394,13 +397,13 @@
                 const authData = JSON.parse(authDataStr);
                 
                 // Exchange code for token (this will cache it server-side)
-                const response = await fetch(CONFIG.authBridgeUrl + '/oauth/exchange-token', {
+                const response = await fetch(CONFIG.backendUrl + '/oauth/exchange-token', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         code: code,
                         code_verifier: authData.code_verifier,
-                        mcp_server_url: authData.mcp_server,
+                        mcp_server_url: authData.mcp_server_url,
                         user_id: authData.user_id
                     })
                 });

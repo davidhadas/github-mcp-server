@@ -7,35 +7,26 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/github/github-mcp-server/internal/aiagent"
 	"github.com/github/github-mcp-server/internal/authbridge"
-	"github.com/github/github-mcp-server/internal/backend"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/spf13/viper"
 )
 
-// MCPServer represents an MCP server configuration
-type MCPServer struct {
-	Name string `mapstructure:"name"`
-	URL  string `mapstructure:"url"`
-}
-
 // Config holds the service configuration
 type Config struct {
-	Port         int         `mapstructure:"port"`
-	RedirectURI  string      `mapstructure:"redirect_uri"`
-	MCPServers   []MCPServer `mapstructure:"mcp_servers"`
-	DemoPagePath string      `mapstructure:"demo_page_path"`
-	AIAgentURL   string      `mapstructure:"ai_agent_url"` // URL of separate AI Agent service
+	Port        int    `mapstructure:"port"`
+	RedirectURI string `mapstructure:"redirect_uri"`
+	AIAgentURL  string `mapstructure:"ai_agent_url"` // URL of separate AI Agent service
 }
 
 func main() {
 	// Load configuration
-	viper.SetConfigName("config")
+	viper.SetConfigName("authbridge-config")
 	viper.SetConfigType("yaml")
 	viper.AddConfigPath(".")
 	viper.AddConfigPath("./cmd/authbridge-extension")
-	viper.AddConfigPath("./cmd/oauth-coordinator") // Backward compatibility
 
 	if err := viper.ReadInConfig(); err != nil {
 		log.Fatalf("Error reading config file: %v", err)
@@ -57,56 +48,20 @@ func main() {
 	// Create AuthBridge instance
 	authBridge := authbridge.NewAuthBridge(config.RedirectURI)
 
-	// Convert MCPServers to backend.MCPServer
-	backendMCPServers := make([]backend.MCPServer, len(config.MCPServers))
-	for i, mcp := range config.MCPServers {
-		backendMCPServers[i] = backend.MCPServer{
-			Name: mcp.Name,
-			URL:  mcp.URL,
-		}
-	}
-
-	// Create Backend instance
-	backendConfig := &backend.Config{
-		Port:         config.Port,
-		RedirectURI:  config.RedirectURI,
-		MCPServers:   backendMCPServers,
-		DemoPagePath: config.DemoPagePath,
-		AIAgentURL:   config.AIAgentURL,
-	}
-	backendService := backend.NewBackend(backendConfig, authBridge)
-
 	// Setup HTTP server
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(corsMiddleware)
 
-	// Task endpoint - Primary interface for browser
-	r.Post("/task", backendService.HandleTask)
+	// Task endpoint - Receives tasks from Backend
+	r.Post("/task", handleTask(authBridge, config.AIAgentURL))
 
 	// MCP Proxy endpoint - For AI Agent to make MCP requests
 	r.Post("/mcp", authBridge.HandleMCPProxyHTTP)
 
-	// OAuth endpoints
-	r.Post("/auth/url", backendService.HandleAuthURL)
-	r.Post("/oauth/exchange-token", backendService.HandleTokenExchange)
-	r.Get("/callback", handleCallback(backendConfig))
-
-	// Token cache management endpoints
-	r.Get("/tokens/status", backendService.HandleTokenStatus)
-	r.Delete("/tokens", backendService.HandleDeleteToken)
-
-	// Serve demo page if configured
-	if config.DemoPagePath != "" {
-		r.Get("/demo", func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-			w.Header().Set("Pragma", "no-cache")
-			w.Header().Set("Expires", "0")
-			http.ServeFile(w, r, config.DemoPagePath)
-		})
-		log.Printf("Demo page registered: %s", config.DemoPagePath)
-	}
+	// OAuth token exchange endpoint - Called by Backend after OAuth
+	r.Post("/oauth/exchange-token", handleTokenExchange(authBridge))
 
 	// Test endpoint for mocking token exchange (only for testing)
 	r.Post("/test/mock-token-exchange", handleMockTokenExchange(authBridge))
@@ -118,17 +73,17 @@ func main() {
 	})
 
 	addr := fmt.Sprintf(":%d", config.Port)
-	log.Printf("KAgentI Service starting on port %d", config.Port)
+	log.Printf("AuthBridge Service starting on port %d", config.Port)
 
 	if config.AIAgentURL != "" {
-		log.Printf("Architecture: Browser → Backend → AuthBridge → AI Agent (HTTP: %s) → AuthBridge MCP Proxy → MCP Server", config.AIAgentURL)
+		log.Printf("Architecture: Backend → AuthBridge:%d → AI Agent:%s → AuthBridge MCP Proxy → MCP Server", config.Port, config.AIAgentURL)
 		log.Printf("AI Agent is a separate process")
 	} else {
-		log.Printf("Architecture: Browser → Backend → AuthBridge → AI Agent (in-process) → MCP Server")
+		log.Printf("Architecture: Backend → AuthBridge:%d → AI Agent (in-process) → MCP Server", config.Port)
 		log.Printf("AI Agent is in-process")
 	}
 
-	log.Printf("Logs: Backend (/tmp/backend.log), AuthBridge (/tmp/authbridge.log), AIAgent (/tmp/aiagent.log)")
+	log.Printf("Logs: AuthBridge (/tmp/authbridge.log), AIAgent (/tmp/aiagent.log)")
 
 	if err := http.ListenAndServe(addr, r); err != nil {
 		log.Fatalf("Server failed: %v", err)
@@ -151,20 +106,74 @@ func corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// handleCallback returns a handler for OAuth callbacks
-func handleCallback(config *backend.Config) http.HandlerFunc {
+// handleTask handles task requests from Backend and forwards to AI Agent
+func handleTask(ab *authbridge.AuthBridge, aiAgentURL string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		code := r.URL.Query().Get("code")
-		state := r.URL.Query().Get("state")
+		var taskReq aiagent.TaskRequest
 
-		if code == "" {
-			http.Error(w, "Missing code parameter", http.StatusBadRequest)
+		if err := json.NewDecoder(r.Body).Decode(&taskReq); err != nil {
+			log.Printf("Invalid task request: %v", err)
+			http.Error(w, fmt.Sprintf("Invalid request: %v", err), http.StatusBadRequest)
 			return
 		}
 
-		// Redirect to demo page with code and state
-		redirectURL := fmt.Sprintf("/demo?code=%s&state=%s", code, state)
-		http.Redirect(w, r, redirectURL, http.StatusFound)
+		log.Printf("Received task from Backend: user_id=%s, task=%s", taskReq.UserID, taskReq.Task)
+
+		var result *aiagent.TaskResponse
+		var err error
+
+		if aiAgentURL != "" {
+			// AI Agent is a separate process - use HTTP
+			result, err = ab.ExecuteTaskViaHTTP(taskReq, aiAgentURL)
+		} else {
+			// AI Agent is in-process - use direct call
+			result, err = ab.ExecuteTask(taskReq)
+		}
+
+		if err != nil {
+			log.Printf("Task execution failed: %v", err)
+			http.Error(w, fmt.Sprintf("Task execution failed: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		log.Printf("Returning result to Backend: status=%s", result.Status)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(result)
+	}
+}
+
+// handleTokenExchange handles OAuth token exchange from Backend
+func handleTokenExchange(ab *authbridge.AuthBridge) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Code         string `json:"code"`
+			CodeVerifier string `json:"code_verifier"`
+			UserID       string `json:"user_id"`
+			MCPServerURL string `json:"mcp_server_url"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			log.Printf("Invalid token exchange request: %v", err)
+			http.Error(w, fmt.Sprintf("Invalid request: %v", err), http.StatusBadRequest)
+			return
+		}
+
+		log.Printf("Token exchange request from Backend: user_id=%s", req.UserID)
+
+		// Forward to AuthBridge (token is cached internally, never returned)
+		err := ab.ExchangeToken(req.UserID, req.MCPServerURL, req.Code, req.CodeVerifier)
+		if err != nil {
+			log.Printf("Token exchange failed: %v", err)
+			http.Error(w, fmt.Sprintf("Token exchange failed: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		log.Printf("Token exchange successful: user_id=%s", req.UserID)
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+		})
 	}
 }
 

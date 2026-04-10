@@ -18,9 +18,11 @@ sleep 1
 
 # Step 1: Get auth URL first (to get code_verifier)
 echo "1️⃣  Getting auth URL to obtain code_verifier..."
-AUTH_RESPONSE=$(curl -s -X POST http://localhost:8185/auth/url \
+AUTH_RESPONSE=$(curl -s -X POST http://localhost:8187/task \
   -H "Content-Type: application/json" \
   -d '{
+    "user_id": "test-user-step4",
+    "task": "Get my GitHub profile",
     "mcp_server_url": "http://localhost:8184"
   }')
 
@@ -32,7 +34,7 @@ echo ""
 echo "2️⃣  Simulating token exchange with mock endpoint..."
 MOCK_CODE="test_oauth_code_step4"
 
-TOKEN_RESPONSE=$(curl -s -X POST http://localhost:8185/test/mock-token-exchange \
+TOKEN_RESPONSE=$(curl -s -X POST http://localhost:8187/test/mock-token-exchange \
   -H "Content-Type: application/json" \
   -d "{
     \"code\": \"$MOCK_CODE\",

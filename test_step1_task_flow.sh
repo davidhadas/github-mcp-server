@@ -18,7 +18,7 @@ sleep 1
 
 # Send a test task
 echo "📤 Sending test task to Backend..."
-RESPONSE=$(curl -s -X POST http://localhost:8185/task \
+RESPONSE=$(curl -s -X POST http://localhost:8187/task \
   -H "Content-Type: application/json" \
   -d '{
     "user_id": "test-user-step1",
@@ -63,7 +63,7 @@ echo ""
 
 # Check AIAgent log
 echo "3️⃣  AIAgent Log:"
-if grep -q "Received task from browser" /tmp/aiagent.log; then
+if grep -q "Received task from AuthBridge" /tmp/aiagent.log; then
     echo "   ✅ AIAgent received task!"
     grep "user_id=test-user-step1" /tmp/aiagent.log | head -3
 else
@@ -74,7 +74,7 @@ echo ""
 
 # Summary
 echo "========================================"
-if grep -q "Received task from browser" /tmp/aiagent.log; then
+if grep -q "Received task from AuthBridge" /tmp/aiagent.log; then
     echo "✅ Step 1 PASSED: Task successfully reached AIAgent"
     echo "   Flow: Frontend → Backend → AuthBridge → AIAgent ✓"
 else

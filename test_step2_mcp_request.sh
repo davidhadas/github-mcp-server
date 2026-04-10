@@ -19,7 +19,7 @@ sleep 1
 
 # Send a test task
 echo "📤 Sending test task to Backend..."
-RESPONSE=$(curl -s -X POST http://localhost:8185/task \
+RESPONSE=$(curl -s -X POST http://localhost:8187/task \
   -H "Content-Type: application/json" \
   -d '{
     "user_id": "test-user-step2",
