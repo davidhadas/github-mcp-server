@@ -417,17 +417,32 @@ func (ab *AuthBridge) ExecuteTaskViaHTTP(taskReq aiagent.TaskRequest, aiAgentURL
 			select {
 			case mcpResp := <-pending.ResponseChan:
 				// Convert MCP response to task response
-				var result map[string]interface{}
+				// Try to unmarshal as interface{} to handle both arrays and objects
+				var result interface{}
 				if err := json.Unmarshal(mcpResp.Body, &result); err != nil {
 					authBridgeLogger.Error("Failed to unmarshal MCP response",
 						"error", err.Error())
 					return nil, fmt.Errorf("failed to unmarshal MCP response: %w", err)
 				}
 
+				// Wrap result in a map if it's an array
+				var finalResult map[string]interface{}
+				if _, isArray := result.([]interface{}); isArray {
+					finalResult = map[string]interface{}{
+						"data": result,
+					}
+				} else if resultMap, ok := result.(map[string]interface{}); ok {
+					finalResult = resultMap
+				} else {
+					finalResult = map[string]interface{}{
+						"data": result,
+					}
+				}
+
 				return &aiagent.TaskResponse{
 					Status:  "success",
 					Message: "Task completed after OAuth",
-					Result:  result,
+					Result:  finalResult,
 				}, nil
 
 			case <-time.After(30 * time.Second):
