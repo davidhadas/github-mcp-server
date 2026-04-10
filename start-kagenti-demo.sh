@@ -7,6 +7,34 @@ echo "🚀 Starting KAgentI Architecture Demo (4 Processes)"
 echo "===================================================="
 echo ""
 
+# Load environment variables from .env file if it exists
+if [ -f .env ]; then
+    echo "📝 Loading OAuth credentials from .env file..."
+    source .env
+else
+    echo "⚠️  No .env file found. Checking environment variables..."
+fi
+
+# Check for required environment variables
+if [ -z "$GITHUB_OAUTH_CLIENT_ID" ]; then
+    echo "❌ Error: GITHUB_OAUTH_CLIENT_ID environment variable not set"
+    echo "   Please create a .env file with your OAuth credentials:"
+    echo "   cp .env.example .env"
+    echo "   # Then edit .env with your actual credentials"
+    exit 1
+fi
+
+if [ -z "$GITHUB_OAUTH_CLIENT_SECRET" ]; then
+    echo "❌ Error: GITHUB_OAUTH_CLIENT_SECRET environment variable not set"
+    echo "   Please create a .env file with your OAuth credentials:"
+    echo "   cp .env.example .env"
+    echo "   # Then edit .env with your actual credentials"
+    exit 1
+fi
+
+echo "✅ OAuth credentials loaded successfully"
+echo ""
+
 # Check if binaries exist
 if [ ! -f "./github-mcp-server" ]; then
     echo "❌ github-mcp-server binary not found. Please build it first:"
@@ -42,7 +70,8 @@ echo ""
 echo "1️⃣  Starting MCP Server (port 8184)..."
 echo "   Role: OAuth discovery + token exchange + MCP protocol"
 echo "   HAS client_secret, handles token exchange"
-./github-mcp-server http --port 8184 --oauth-client-id "Ov23lipjfVegsSqldX5H" --oauth-client-secret "751307b6ab9db77b4ff429e918db80b70770ed89" --oauth-redirect-uri "http://localhost:8187/callback" > /tmp/mcp-server-kagenti.log 2>&1 &
+echo "   Using OAuth credentials from environment variables"
+./github-mcp-server http --port 8184 --oauth-client-id "$GITHUB_OAUTH_CLIENT_ID" --oauth-client-secret "$GITHUB_OAUTH_CLIENT_SECRET" --oauth-redirect-uri "http://localhost:8187/callback" > /tmp/mcp-server-kagenti.log 2>&1 &
 MCP_PID=$!
 echo $MCP_PID > /tmp/mcp-server-kagenti.pid
 echo "   ✅ MCP Server started (PID: $MCP_PID)"
