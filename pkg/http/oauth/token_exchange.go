@@ -16,15 +16,17 @@ type TokenExchangeHandler struct {
 	clientSecret string
 	redirectURI  string
 	tokenURL     string
+	logger       *slog.Logger
 }
 
 // NewTokenExchangeHandler creates a new token exchange handler.
-func NewTokenExchangeHandler(clientID, clientSecret, redirectURI, tokenURL string) *TokenExchangeHandler {
+func NewTokenExchangeHandler(clientID, clientSecret, redirectURI, tokenURL string, logger *slog.Logger) *TokenExchangeHandler {
 	return &TokenExchangeHandler{
 		clientID:     clientID,
 		clientSecret: clientSecret,
 		redirectURI:  redirectURI,
 		tokenURL:     tokenURL,
+		logger:       logger,
 	}
 }
 
@@ -64,7 +66,7 @@ func (h *TokenExchangeHandler) HandleTokenExchange(w http.ResponseWriter, r *htt
 	data.Set("code_verifier", req.CodeVerifier)
 	data.Set("redirect_uri", h.redirectURI)
 
-	slog.Info("Exchanging authorization code for token",
+	h.logger.Info("Exchanging authorization code for token",
 		"client_id", h.clientID,
 		"redirect_uri", h.redirectURI,
 		"token_url", h.tokenURL,
@@ -72,7 +74,7 @@ func (h *TokenExchangeHandler) HandleTokenExchange(w http.ResponseWriter, r *htt
 
 	tokenReq, err := http.NewRequest("POST", h.tokenURL, strings.NewReader(data.Encode()))
 	if err != nil {
-		slog.Error("Failed to create token request", "error", err)
+		h.logger.Error("Failed to create token request", "error", err)
 		http.Error(w, fmt.Sprintf("Failed to create token request: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -84,7 +86,7 @@ func (h *TokenExchangeHandler) HandleTokenExchange(w http.ResponseWriter, r *htt
 	client := &http.Client{}
 	resp, err := client.Do(tokenReq)
 	if err != nil {
-		slog.Error("Failed to exchange token", "error", err)
+		h.logger.Error("Failed to exchange token", "error", err)
 		http.Error(w, fmt.Sprintf("Failed to exchange token: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -92,17 +94,17 @@ func (h *TokenExchangeHandler) HandleTokenExchange(w http.ResponseWriter, r *htt
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		slog.Error("Failed to read response", "error", err)
+		h.logger.Error("Failed to read response", "error", err)
 		http.Error(w, fmt.Sprintf("Failed to read response: %v", err), http.StatusInternalServerError)
 		return
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		slog.Error("Token exchange failed",
+		h.logger.Error("Token exchange failed",
 			"status", resp.StatusCode,
 			"response", string(body))
 	} else {
-		slog.Info("Token exchange successful")
+		h.logger.Info("Token exchange successful")
 	}
 
 	// Forward the response from GitHub

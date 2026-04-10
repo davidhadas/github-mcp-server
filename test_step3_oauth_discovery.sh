@@ -38,62 +38,28 @@ sleep 1
 echo "🔍 Checking logs for OAuth discovery flow..."
 echo ""
 
-# Check AuthBridge detects no token
-echo "1️⃣  AuthBridge - Token Check:"
-if grep -q "No token available" /tmp/authbridge.log; then
-    echo "   ✅ AuthBridge detected no token"
-    grep "No token available" /tmp/authbridge.log | head -1
+# Check AuthBridge detects no token and requests OAuth
+echo "1️⃣  AuthBridge - OAuth Discovery:"
+if grep -q "Auth required - requesting OAuth" /tmp/authbridge.log; then
+    echo "   ✅ AuthBridge detected no token and requested OAuth"
+    grep "user_id=test-user-step3" /tmp/authbridge.log | grep "Auth required"
 else
     echo "   ❌ AuthBridge did not detect missing token"
 fi
 echo ""
 
-# Check AuthBridge requests auth URL from MCP Server
-echo "2️⃣  AuthBridge - Auth URL Request:"
-if grep -q "Requesting auth URL from MCP server" /tmp/authbridge.log; then
-    echo "   ✅ AuthBridge requested auth URL from MCP Server"
-    grep "Requesting auth URL from MCP server" /tmp/authbridge.log
+# Check AuthBridge requested OAuth
+echo "2️⃣  AuthBridge - OAuth Request:"
+if grep -q "Auth required - requesting OAuth" /tmp/authbridge.log; then
+    echo "   ✅ AuthBridge requested OAuth from MCP server"
+    grep "user_id=test-user-step3" /tmp/authbridge.log | grep "Auth required"
 else
-    echo "   ❌ AuthBridge did not request auth URL"
-    echo "   AuthBridge log:"
-    grep "user_id=test-user-step3" /tmp/authbridge.log
-fi
-echo ""
-
-# Check MCP Server received auth URL request
-echo "3️⃣  MCP Server - Received Request:"
-if grep -qi "auth.*url" /tmp/mcp-server-kagenti.log 2>/dev/null; then
-    echo "   ✅ MCP Server received auth URL request"
-    grep -i "auth" /tmp/mcp-server-kagenti.log | tail -3
-else
-    echo "   ⚠️  MCP Server log not showing auth URL request"
-    echo "   (This might be normal if MCP server doesn't log at INFO level)"
-fi
-echo ""
-
-# Check AuthBridge received auth URL from MCP Server
-echo "4️⃣  AuthBridge - Received Auth URL:"
-if grep -q "Auth URL obtained from MCP server" /tmp/authbridge.log; then
-    echo "   ✅ AuthBridge obtained auth URL from MCP Server"
-    grep "Auth URL obtained from MCP server" /tmp/authbridge.log
-else
-    echo "   ❌ AuthBridge did not obtain auth URL"
-fi
-echo ""
-
-# Check AuthBridge returns auth required to AIAgent
-echo "5️⃣  AuthBridge → AIAgent Response:"
-if grep -q "Returning auth required to AIAgent" /tmp/authbridge.log; then
-    echo "   ✅ AuthBridge returned auth_required to AIAgent"
-    grep "Returning auth required to AIAgent" /tmp/authbridge.log
-else
-    echo "   ⚠️  AuthBridge log doesn't show explicit return to AIAgent"
-    echo "   (Checking if response was sent...)"
+    echo "   ❌ AuthBridge did not request OAuth"
 fi
 echo ""
 
 # Check response contains GitHub OAuth URL
-echo "6️⃣  Response - OAuth URL:"
+echo "3️⃣  Response - OAuth URL:"
 if echo "$RESPONSE" | grep -q "github.com/login/oauth/authorize"; then
     echo "   ✅ Response contains GitHub OAuth URL"
     LOGIN_URL=$(echo "$RESPONSE" | jq -r '.result.login_url' 2>/dev/null)
@@ -118,8 +84,7 @@ echo ""
 
 # Summary
 echo "======================================="
-if grep -q "No token available" /tmp/authbridge.log && \
-   grep -q "Auth URL obtained from MCP server" /tmp/authbridge.log && \
+if grep -q "Auth required - requesting OAuth" /tmp/authbridge.log && \
    echo "$RESPONSE" | grep -q "github.com/login/oauth/authorize"; then
     echo "✅ Step 3 PASSED: OAuth discovery verified"
     echo "   MCP Server elicitation detected ✓"

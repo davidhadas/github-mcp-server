@@ -174,7 +174,7 @@ func RunHTTPServer(cfg ServerConfig) error {
 
 	r := chi.NewRouter()
 	handler := NewHTTPMcpHandler(ctx, &cfg, deps, t, logger, apiHost, append(serverOptions, WithFeatureChecker(featureChecker), WithOAuthConfig(oauthCfg))...)
-	oauthHandler, err := oauth.NewAuthHandler(oauthCfg, apiHost)
+	oauthHandler, err := oauth.NewAuthHandler(oauthCfg, apiHost, logger)
 	if err != nil {
 		return fmt.Errorf("failed to create OAuth handler: %w", err)
 	}

@@ -20,6 +20,7 @@ type AuthRequiredError struct {
 	AuthURL      string
 	CodeVerifier string
 	UserID       string
+	MCPServerURL string
 }
 
 func (e *AuthRequiredError) Error() string {
@@ -39,6 +40,11 @@ func init() {
 	authBridgeLogger = slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	}))
+}
+
+// Log returns the shared AuthBridge logger for use by the extension command
+func Log() *slog.Logger {
+	return authBridgeLogger
 }
 
 // PendingMCPRequest represents a blocked MCP request waiting for OAuth
@@ -125,26 +131,11 @@ func (tc *TokenCache) DeleteToken(userID, mcpServerURL string) {
 	}
 }
 
-// ListUserTokens returns all MCP servers a user has tokens for
-func (tc *TokenCache) ListUserTokens(userID string) []string {
-	tc.mu.RLock()
-	defer tc.mu.RUnlock()
-
-	var servers []string
-	if userTokens, ok := tc.tokens[userID]; ok {
-		for server := range userTokens {
-			servers = append(servers, server)
-		}
-	}
-	return servers
-}
-
 // AuthBridge handles authentication and token management
-// It implements the aiagent.AuthBridge interface and wraps AIAgent
+// It only supports HTTP-based AI Agent (no in-process support)
 type AuthBridge struct {
 	tokenCache      *TokenCache
 	redirectURI     string
-	agents          sync.Map // userID -> *aiagent.AIAgent
 	mu              sync.RWMutex
 	pendingRequests sync.Map // userID -> *PendingMCPRequest
 }
@@ -162,93 +153,20 @@ func NewAuthBridge(redirectURI string) *AuthBridge {
 // This bypasses the normal OAuth flow and directly caches a token
 func (ab *AuthBridge) SetTokenForTesting(userID, mcpServerURL, token string, expiresIn int) {
 	ab.tokenCache.SetToken(userID, mcpServerURL, token, expiresIn)
-	authBridgeLogger.Info("Token set for testing", "user_id", userID, "mcp_server", mcpServerURL)
-}
-
-// GetOrCreateAgent returns an existing agent or creates a new one for the user
-func (ab *AuthBridge) GetOrCreateAgent(userID string) *aiagent.AIAgent {
-	if agent, ok := ab.agents.Load(userID); ok {
-		return agent.(*aiagent.AIAgent)
-	}
-
-	authBridgeLogger.Info("Creating new AIAgent instance", "user_id", userID)
-	agent := aiagent.NewAIAgent(ab, userID)
-	ab.agents.Store(userID, agent)
-	return agent
-}
-
-// ExecuteTask executes a task through the wrapped AIAgent
-// This is the main entry point from Backend
-func (ab *AuthBridge) ExecuteTask(taskReq aiagent.TaskRequest) (*aiagent.TaskResponse, error) {
-	authBridgeLogger.Info("← Received task request from Backend",
-		"user_id", taskReq.UserID,
-		"task", taskReq.Task)
-
-	// Get or create agent for this user
-	agent := ab.GetOrCreateAgent(taskReq.UserID)
-
-	// Execute task through AIAgent
-	authBridgeLogger.Info("→ Forwarding task to AIAgent",
-		"user_id", taskReq.UserID)
-
-	result, err := agent.ExecuteTask(taskReq)
-
-	if err != nil {
-		// Check if this is an AuthRequiredError
-		if authErr, ok := err.(*AuthRequiredError); ok {
-			// Auth required - return directly to Backend (bypassing AIAgent's normal flow)
-			authBridgeLogger.Info("← Caught AuthRequiredError, returning directly to Backend",
-				"user_id", authErr.UserID)
-
-			return &aiagent.TaskResponse{
-				Status:  "auth_required",
-				Message: "OAuth authentication needed",
-				Result: map[string]interface{}{
-					"error":          "authentication_required",
-					"error_message":  "OAuth authentication needed",
-					"login_url":      authErr.AuthURL,
-					"code_verifier":  authErr.CodeVerifier,
-					"user_id":        authErr.UserID,
-					"mcp_server_url": taskReq.MCPServerURL,
-				},
-			}, nil
-		}
-
-		// Other error
-		authBridgeLogger.Error("← AIAgent returned error",
-			"error", err.Error(),
-			"user_id", taskReq.UserID)
-		return nil, err
-	}
-
-	authBridgeLogger.Info("← Received result from AIAgent",
-		"user_id", taskReq.UserID,
-		"status", result.Status)
-
-	return result, nil
-}
-
-// GetTokenCache returns the token cache
-func (ab *AuthBridge) GetTokenCache() *TokenCache {
-	return ab.tokenCache
 }
 
 // HandleMCPRequest processes MCP requests from AIAgent
 // This implements the aiagent.AuthBridge interface
 func (ab *AuthBridge) HandleMCPRequest(req aiagent.MCPRequest) (*aiagent.MCPResponse, error) {
-	authBridgeLogger.Info("← Received MCP request from AIAgent",
-		"user_id", req.UserID,
-		"mcp_server", req.MCPServerURL,
-		"method", req.Method)
-
 	// Check token cache
 	token, hasToken := ab.tokenCache.GetToken(req.UserID, req.MCPServerURL)
 
 	if !hasToken {
 		// No token - get auth URL from MCP server
-		authBridgeLogger.Info("No token available, requesting auth URL from MCP server",
+		authBridgeLogger.Info("Auth required - requesting OAuth",
 			"user_id", req.UserID,
-			"mcp_server", req.MCPServerURL)
+			"mcp_server", req.MCPServerURL,
+			"method", req.Method)
 
 		authURLReq := map[string]string{
 			"redirect_uri": ab.redirectURI,
@@ -261,7 +179,7 @@ func (ab *AuthBridge) HandleMCPRequest(req aiagent.MCPRequest) (*aiagent.MCPResp
 			bytes.NewReader(jsonData),
 		)
 		if err != nil {
-			authBridgeLogger.Error("Failed to get auth URL from MCP server",
+			authBridgeLogger.Error("Failed to get auth URL",
 				"error", err.Error(),
 				"mcp_server", req.MCPServerURL)
 			return nil, fmt.Errorf("failed to get auth URL: %v", err)
@@ -275,25 +193,17 @@ func (ab *AuthBridge) HandleMCPRequest(req aiagent.MCPRequest) (*aiagent.MCPResp
 		}
 		json.Unmarshal(body, &authResp)
 
-		authBridgeLogger.Info("Auth URL obtained from MCP server",
-			"user_id", req.UserID,
-			"mcp_server", req.MCPServerURL,
-			"has_url", authResp.URL != "")
-
-		authBridgeLogger.Info("→ Returning AuthRequiredError (will bypass AIAgent)",
-			"user_id", req.UserID,
-			"has_auth_url", authResp.URL != "")
-
 		// Return special error that ExecuteTask will catch
 		return nil, &AuthRequiredError{
 			AuthURL:      authResp.URL,
 			CodeVerifier: authResp.CodeVerifier,
 			UserID:       req.UserID,
+			MCPServerURL: req.MCPServerURL,
 		}
 	}
 
 	// Token exists - make MCP request
-	authBridgeLogger.Info("Using cached token for MCP request",
+	authBridgeLogger.Info("Processing MCP request with cached token",
 		"user_id", req.UserID,
 		"method", req.Method)
 
@@ -311,9 +221,6 @@ func (ab *AuthBridge) HandleMCPRequest(req aiagent.MCPRequest) (*aiagent.MCPResp
 			},
 		}
 		body, _ := json.Marshal(result)
-		authBridgeLogger.Info("→ Returning tools list to AIAgent",
-			"user_id", req.UserID,
-			"tool_count", 3)
 		return &aiagent.MCPResponse{
 			Status: http.StatusOK,
 			Body:   body,
@@ -368,25 +275,43 @@ func (ab *AuthBridge) HandleMCPRequest(req aiagent.MCPRequest) (*aiagent.MCPResp
 
 	body, _ := io.ReadAll(apiResp.Body)
 
-	// If 401, token expired - delete from cache
+	// If 401, token expired - delete from cache and return auth error
 	if apiResp.StatusCode == http.StatusUnauthorized {
-		authBridgeLogger.Info("Token expired, removing from cache",
+		authBridgeLogger.Info("Token expired - requesting OAuth",
 			"user_id", req.UserID,
 			"mcp_server", req.MCPServerURL)
 		ab.tokenCache.DeleteToken(req.UserID, req.MCPServerURL)
 
-		authBridgeLogger.Info("→ Returning auth required to AIAgent",
-			"user_id", req.UserID)
-		return &aiagent.MCPResponse{
-			Status:    http.StatusUnauthorized,
-			NeedsAuth: true,
-		}, nil
-	}
+		// Get new auth URL
+		authURLReq := map[string]string{
+			"redirect_uri": ab.redirectURI,
+		}
+		jsonData, _ := json.Marshal(authURLReq)
 
-	authBridgeLogger.Info("→ Returning MCP response to AIAgent",
-		"user_id", req.UserID,
-		"status", apiResp.StatusCode,
-		"body_size", len(body))
+		mcpResp, err := http.Post(
+			req.MCPServerURL+"/auth/url",
+			"application/json",
+			bytes.NewReader(jsonData),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get auth URL after token expiry: %v", err)
+		}
+		defer mcpResp.Body.Close()
+
+		body, _ := io.ReadAll(mcpResp.Body)
+		var authResp struct {
+			URL          string `json:"url"`
+			CodeVerifier string `json:"code_verifier"`
+		}
+		json.Unmarshal(body, &authResp)
+
+		return nil, &AuthRequiredError{
+			AuthURL:      authResp.URL,
+			CodeVerifier: authResp.CodeVerifier,
+			UserID:       req.UserID,
+			MCPServerURL: req.MCPServerURL,
+		}
+	}
 
 	return &aiagent.MCPResponse{
 		Status: apiResp.StatusCode,
@@ -405,17 +330,13 @@ func (ab *AuthBridge) HandleMCPProxyHTTP(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	authBridgeLogger.Info("← Received MCP request from AI Agent (HTTP)",
-		"user_id", mcpReq.UserID,
-		"method", mcpReq.Method)
-
 	// Use existing HandleMCPRequest logic
 	mcpResp, err := ab.HandleMCPRequest(mcpReq)
 	if err != nil {
 		// Check if this is an AuthRequiredError
 		if authErr, ok := err.(*AuthRequiredError); ok {
 			// BLOCK this request and wait for OAuth to complete
-			authBridgeLogger.Info("Auth required - blocking MCP request until OAuth completes",
+			authBridgeLogger.Info("Blocking MCP request for OAuth",
 				"user_id", authErr.UserID)
 
 			// Create pending request with channels
@@ -429,11 +350,6 @@ func (ab *AuthBridge) HandleMCPProxyHTTP(w http.ResponseWriter, r *http.Request)
 			// Store pending request
 			ab.pendingRequests.Store(mcpReq.UserID, pending)
 
-			// Return AuthRequiredError to trigger OAuth redirect via Frontend Session
-			// But keep THIS session (MCP Request Session) open by not returning yet
-			authBridgeLogger.Info("→ Stored pending request, will trigger OAuth via ExecuteTaskViaHTTP",
-				"user_id", authErr.UserID)
-
 			// Signal that we need to return auth error to frontend
 			// This will be caught by ExecuteTaskViaHTTP
 			pending.ErrorChan <- err
@@ -441,13 +357,10 @@ func (ab *AuthBridge) HandleMCPProxyHTTP(w http.ResponseWriter, r *http.Request)
 			// BLOCK and wait for either:
 			// 1. FrontendReady signal (new frontend request with token)
 			// 2. Timeout
-			authBridgeLogger.Info("⏸ Blocking MCP request, waiting for OAuth completion",
-				"user_id", mcpReq.UserID)
-
 			select {
 			case <-pending.FrontendReady:
 				// OAuth completed, retry the MCP request
-				authBridgeLogger.Info("▶ OAuth completed, retrying MCP request",
+				authBridgeLogger.Info("OAuth completed - retrying MCP request",
 					"user_id", mcpReq.UserID)
 
 				mcpResp, err = ab.HandleMCPRequest(mcpReq)
@@ -479,10 +392,6 @@ func (ab *AuthBridge) HandleMCPProxyHTTP(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Return successful MCP response
-	authBridgeLogger.Info("→ Returning MCP response to AI Agent",
-		"status", mcpResp.Status,
-		"body_size", len(mcpResp.Body))
-
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(mcpResp.Status)
 	w.Write(mcpResp.Body)
@@ -492,17 +401,13 @@ func (ab *AuthBridge) HandleMCPProxyHTTP(w http.ResponseWriter, r *http.Request)
 // This replaces the in-process ExecuteTask when AI Agent is a separate service
 // It also handles OAuth redirects and resumes blocked MCP requests
 func (ab *AuthBridge) ExecuteTaskViaHTTP(taskReq aiagent.TaskRequest, aiAgentURL string) (*aiagent.TaskResponse, error) {
-	authBridgeLogger.Info("← Received task request from Backend",
-		"user_id", taskReq.UserID,
-		"task", taskReq.Task)
-
 	// Check if there's a pending MCP request for this user
 	if pendingVal, ok := ab.pendingRequests.Load(taskReq.UserID); ok {
 		pending := pendingVal.(*PendingMCPRequest)
 
 		// Check if this is a retry after OAuth (we have a token now)
 		if _, hasToken := ab.tokenCache.GetToken(taskReq.UserID, pending.Request.MCPServerURL); hasToken {
-			authBridgeLogger.Info("Token now available, resuming blocked MCP request",
+			authBridgeLogger.Info("Resuming blocked MCP request after OAuth",
 				"user_id", taskReq.UserID)
 
 			// Signal the blocked HandleMCPProxyHTTP to resume
@@ -512,14 +417,17 @@ func (ab *AuthBridge) ExecuteTaskViaHTTP(taskReq aiagent.TaskRequest, aiAgentURL
 			select {
 			case mcpResp := <-pending.ResponseChan:
 				// Convert MCP response to task response
-				authBridgeLogger.Info("← Received MCP response from resumed request",
-					"user_id", taskReq.UserID,
-					"status", mcpResp.Status)
+				var result map[string]interface{}
+				if err := json.Unmarshal(mcpResp.Body, &result); err != nil {
+					authBridgeLogger.Error("Failed to unmarshal MCP response",
+						"error", err.Error())
+					return nil, fmt.Errorf("failed to unmarshal MCP response: %w", err)
+				}
 
 				return &aiagent.TaskResponse{
 					Status:  "success",
 					Message: "Task completed after OAuth",
-					Result:  json.RawMessage(mcpResp.Body),
+					Result:  result,
 				}, nil
 
 			case <-time.After(30 * time.Second):
@@ -532,9 +440,8 @@ func (ab *AuthBridge) ExecuteTaskViaHTTP(taskReq aiagent.TaskRequest, aiAgentURL
 	}
 
 	// Forward task to AI Agent via HTTP
-	authBridgeLogger.Info("→ Forwarding task to AI Agent (HTTP)",
-		"user_id", taskReq.UserID,
-		"ai_agent_url", aiAgentURL)
+	authBridgeLogger.Info("Forwarding task to AI Agent",
+		"user_id", taskReq.UserID)
 
 	reqBody, err := json.Marshal(taskReq)
 	if err != nil {
@@ -572,10 +479,6 @@ func (ab *AuthBridge) ExecuteTaskViaHTTP(taskReq aiagent.TaskRequest, aiAgentURL
 			return nil, fmt.Errorf("failed to parse AI Agent response: %w", err)
 		}
 
-		authBridgeLogger.Info("← Received result from AI Agent (HTTP)",
-			"user_id", taskReq.UserID,
-			"status", taskResp.Status)
-
 		return &taskResp, nil
 
 	case err := <-errChan:
@@ -593,9 +496,6 @@ func (ab *AuthBridge) ExecuteTaskViaHTTP(taskReq aiagent.TaskRequest, aiAgentURL
 			case authErr := <-pending.ErrorChan:
 				// Auth required - return to frontend for OAuth redirect
 				if authReqErr, ok := authErr.(*AuthRequiredError); ok {
-					authBridgeLogger.Info("← Caught AuthRequiredError, returning to Backend for OAuth redirect",
-						"user_id", authReqErr.UserID)
-
 					return &aiagent.TaskResponse{
 						Status:  "auth_required",
 						Message: "OAuth authentication needed",
@@ -605,7 +505,7 @@ func (ab *AuthBridge) ExecuteTaskViaHTTP(taskReq aiagent.TaskRequest, aiAgentURL
 							"login_url":      authReqErr.AuthURL,
 							"code_verifier":  authReqErr.CodeVerifier,
 							"user_id":        authReqErr.UserID,
-							"mcp_server_url": taskReq.MCPServerURL,
+							"mcp_server_url": authReqErr.MCPServerURL,
 						},
 					}, nil
 				}
@@ -628,10 +528,6 @@ func (ab *AuthBridge) ExecuteTaskViaHTTP(taskReq aiagent.TaskRequest, aiAgentURL
 			if err := json.Unmarshal(body, &taskResp); err != nil {
 				return nil, fmt.Errorf("failed to parse AI Agent response: %w", err)
 			}
-
-			authBridgeLogger.Info("← Received result from AI Agent (HTTP)",
-				"user_id", taskReq.UserID,
-				"status", taskResp.Status)
 
 			return &taskResp, nil
 
@@ -676,11 +572,6 @@ func (ab *AuthBridge) ExchangeToken(userID, mcpServerURL, code, codeVerifier str
 
 	body, _ := io.ReadAll(mcpResp.Body)
 
-	// Log raw response for debugging
-	authBridgeLogger.Info("Received token response from MCP server",
-		"status", mcpResp.StatusCode,
-		"body", string(body))
-
 	var tokenResp struct {
 		AccessToken string `json:"access_token"`
 		ExpiresIn   int    `json:"expires_in"`
@@ -702,10 +593,9 @@ func (ab *AuthBridge) ExchangeToken(userID, mcpServerURL, code, codeVerifier str
 	// Cache the token internally (token never leaves AuthBridge)
 	ab.tokenCache.SetToken(userID, mcpServerURL, tokenResp.AccessToken, tokenResp.ExpiresIn)
 
-	authBridgeLogger.Info("Token exchange successful and cached",
+	authBridgeLogger.Info("Token exchange successful",
 		"user_id", userID,
-		"mcp_server", mcpServerURL,
-		"expires_in", tokenResp.ExpiresIn)
+		"mcp_server", mcpServerURL)
 
 	return nil
 }

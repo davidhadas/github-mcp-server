@@ -51,10 +51,9 @@ echo ""
 
 # Check AuthBridge log
 echo "2️⃣  AuthBridge Log:"
-if grep -q "Received task request from Backend" /tmp/authbridge.log && \
-   grep -q "Forwarding task to AIAgent" /tmp/authbridge.log; then
+if grep -q "Forwarding task to AI Agent" /tmp/authbridge.log; then
     echo "   ✅ AuthBridge received and forwarded to AIAgent"
-    grep "user_id=test-user-step1" /tmp/authbridge.log | head -2
+    grep "user_id=test-user-step1" /tmp/authbridge.log | grep "Forwarding"
 else
     echo "   ❌ AuthBridge did not process task correctly"
     tail -5 /tmp/authbridge.log

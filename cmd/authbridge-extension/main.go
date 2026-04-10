@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/github/github-mcp-server/internal/aiagent"
@@ -29,12 +30,14 @@ func main() {
 	viper.AddConfigPath("./cmd/authbridge-extension")
 
 	if err := viper.ReadInConfig(); err != nil {
-		log.Fatalf("Error reading config file: %v", err)
+		authbridge.Log().Error("Error reading config file", "error", err)
+		os.Exit(1)
 	}
 
 	var config Config
 	if err := viper.Unmarshal(&config); err != nil {
-		log.Fatalf("Error unmarshaling config: %v", err)
+		authbridge.Log().Error("Error unmarshaling config", "error", err)
+		os.Exit(1)
 	}
 
 	// Validate configuration
@@ -44,13 +47,23 @@ func main() {
 	if config.RedirectURI == "" {
 		config.RedirectURI = fmt.Sprintf("http://localhost:%d/callback", config.Port)
 	}
+	if config.AIAgentURL == "" {
+		authbridge.Log().Error("ai_agent_url is required in configuration")
+		os.Exit(1)
+	}
 
 	// Create AuthBridge instance
 	authBridge := authbridge.NewAuthBridge(config.RedirectURI)
 
-	// Setup HTTP server
+	// Setup HTTP server with separate access log
+	accessLog, err := os.OpenFile("/tmp/authbridge-access.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err != nil {
+		authbridge.Log().Error("Failed to open access log file", "error", err)
+		os.Exit(1)
+	}
+
 	r := chi.NewRouter()
-	r.Use(middleware.Logger)
+	r.Use(middleware.RequestLogger(&middleware.DefaultLogFormatter{Logger: log.New(accessLog, "", log.LstdFlags)}))
 	r.Use(middleware.Recoverer)
 	r.Use(corsMiddleware)
 
@@ -73,20 +86,14 @@ func main() {
 	})
 
 	addr := fmt.Sprintf(":%d", config.Port)
-	log.Printf("AuthBridge Service starting on port %d", config.Port)
-
-	if config.AIAgentURL != "" {
-		log.Printf("Architecture: Backend → AuthBridge:%d → AI Agent:%s → AuthBridge MCP Proxy → MCP Server", config.Port, config.AIAgentURL)
-		log.Printf("AI Agent is a separate process")
-	} else {
-		log.Printf("Architecture: Backend → AuthBridge:%d → AI Agent (in-process) → MCP Server", config.Port)
-		log.Printf("AI Agent is in-process")
-	}
-
-	log.Printf("Logs: AuthBridge (/tmp/authbridge.log), AIAgent (/tmp/aiagent.log)")
+	authbridge.Log().Info("AuthBridge Service starting",
+		"port", config.Port,
+		"architecture", fmt.Sprintf("Backend → AuthBridge:%d → AI Agent:%s → AuthBridge MCP Proxy → MCP Server", config.Port, config.AIAgentURL),
+		"logs", "AuthBridge (/tmp/authbridge.log), AI Agent (/tmp/aiagent.log)")
 
 	if err := http.ListenAndServe(addr, r); err != nil {
-		log.Fatalf("Server failed: %v", err)
+		authbridge.Log().Error("Server failed", "error", err)
+		os.Exit(1)
 	}
 }
 
@@ -106,37 +113,35 @@ func corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// handleTask handles task requests from Backend and forwards to AI Agent
+// handleTask handles task requests from Backend and forwards to AI Agent via HTTP
 func handleTask(ab *authbridge.AuthBridge, aiAgentURL string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var taskReq aiagent.TaskRequest
 
 		if err := json.NewDecoder(r.Body).Decode(&taskReq); err != nil {
-			log.Printf("Invalid task request: %v", err)
+			authbridge.Log().Error("Invalid task request", "error", err)
 			http.Error(w, fmt.Sprintf("Invalid request: %v", err), http.StatusBadRequest)
 			return
 		}
 
-		log.Printf("Received task from Backend: user_id=%s, task=%s", taskReq.UserID, taskReq.Task)
+		authbridge.Log().Info("Received task from Backend", "user_id", taskReq.UserID, "task", taskReq.Task)
 
-		var result *aiagent.TaskResponse
-		var err error
-
-		if aiAgentURL != "" {
-			// AI Agent is a separate process - use HTTP
-			result, err = ab.ExecuteTaskViaHTTP(taskReq, aiAgentURL)
-		} else {
-			// AI Agent is in-process - use direct call
-			result, err = ab.ExecuteTask(taskReq)
+		// AI Agent must be a separate process
+		if aiAgentURL == "" {
+			authbridge.Log().Error("ai_agent_url not configured")
+			http.Error(w, "AI Agent URL not configured", http.StatusInternalServerError)
+			return
 		}
 
+		// Forward to AI Agent via HTTP
+		result, err := ab.ExecuteTaskViaHTTP(taskReq, aiAgentURL)
 		if err != nil {
-			log.Printf("Task execution failed: %v", err)
+			authbridge.Log().Error("Task execution failed", "error", err)
 			http.Error(w, fmt.Sprintf("Task execution failed: %v", err), http.StatusInternalServerError)
 			return
 		}
 
-		log.Printf("Returning result to Backend: status=%s", result.Status)
+		authbridge.Log().Info("Returning result to Backend", "status", result.Status)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(result)
 	}
@@ -153,22 +158,22 @@ func handleTokenExchange(ab *authbridge.AuthBridge) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			log.Printf("Invalid token exchange request: %v", err)
+			authbridge.Log().Error("Invalid token exchange request", "error", err)
 			http.Error(w, fmt.Sprintf("Invalid request: %v", err), http.StatusBadRequest)
 			return
 		}
 
-		log.Printf("Token exchange request from Backend: user_id=%s", req.UserID)
+		authbridge.Log().Info("Token exchange request from Backend", "user_id", req.UserID)
 
 		// Forward to AuthBridge (token is cached internally, never returned)
 		err := ab.ExchangeToken(req.UserID, req.MCPServerURL, req.Code, req.CodeVerifier)
 		if err != nil {
-			log.Printf("Token exchange failed: %v", err)
+			authbridge.Log().Error("Token exchange failed", "error", err, "user_id", req.UserID)
 			http.Error(w, fmt.Sprintf("Token exchange failed: %v", err), http.StatusInternalServerError)
 			return
 		}
 
-		log.Printf("Token exchange successful: user_id=%s", req.UserID)
+		authbridge.Log().Info("Token exchange successful", "user_id", req.UserID)
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -205,7 +210,7 @@ func handleMockTokenExchange(ab *authbridge.AuthBridge) http.HandlerFunc {
 		mockToken := "gho_test_mock_token_" + req.Code
 		ab.SetTokenForTesting(req.UserID, req.MCPServerURL, mockToken, 3600)
 
-		log.Printf("Mock token exchange successful for user: %s", req.UserID)
+		authbridge.Log().Info("Mock token exchange successful", "user_id", req.UserID)
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{

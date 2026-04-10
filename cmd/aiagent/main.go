@@ -14,6 +14,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/spf13/viper"
 )
 
 // Logger for AI Agent
@@ -33,10 +34,9 @@ func init() {
 
 // TaskRequest represents a task from the browser
 type TaskRequest struct {
-	UserID       string                 `json:"user_id"`
-	Task         string                 `json:"task"`
-	MCPServerURL string                 `json:"mcp_server_url"`
-	Params       map[string]interface{} `json:"params,omitempty"`
+	UserID string                 `json:"user_id"`
+	Task   string                 `json:"task"`
+	Params map[string]interface{} `json:"params,omitempty"`
 }
 
 // TaskResponse represents the response to a task
@@ -64,12 +64,14 @@ type MCPResponse struct {
 // AIAgent handles task orchestration
 type AIAgent struct {
 	authBridgeURL string // URL of AuthBridge MCP proxy
+	mcpServerURL  string // URL of MCP server (configured, not from frontend)
 }
 
 // NewAIAgent creates a new AI Agent instance
-func NewAIAgent(authBridgeURL string) *AIAgent {
+func NewAIAgent(authBridgeURL, mcpServerURL string) *AIAgent {
 	return &AIAgent{
 		authBridgeURL: authBridgeURL,
+		mcpServerURL:  mcpServerURL,
 	}
 }
 
@@ -153,7 +155,7 @@ func (agent *AIAgent) taskToMCPRequest(task TaskRequest) MCPRequest {
 
 	return MCPRequest{
 		UserID:       task.UserID,
-		MCPServerURL: task.MCPServerURL,
+		MCPServerURL: agent.mcpServerURL,
 		Method:       method,
 		Params:       params,
 	}
@@ -312,13 +314,44 @@ func (agent *AIAgent) formatRepositoriesList(rawResult interface{}) interface{} 
 }
 
 func main() {
-	port := 8186
-	authBridgeURL := "http://localhost:8185/mcp"
+	// Load configuration
+	viper.SetConfigName("aiagent-config")
+	viper.SetConfigType("yaml")
+	viper.AddConfigPath(".")
+	viper.AddConfigPath("./cmd/aiagent")
 
-	agent := NewAIAgent(authBridgeURL)
+	if err := viper.ReadInConfig(); err != nil {
+		agentLogger.Error("Error reading config file", "error", err)
+		os.Exit(1)
+	}
+
+	port := viper.GetInt("port")
+	if port == 0 {
+		port = 8186
+	}
+
+	authBridgeURL := viper.GetString("authbridge_url")
+	if authBridgeURL == "" {
+		authBridgeURL = "http://localhost:8185/mcp"
+	}
+
+	mcpServerURL := viper.GetString("mcp_server_url")
+	if mcpServerURL == "" {
+		agentLogger.Error("mcp_server_url must be configured in aiagent-config.yaml")
+		os.Exit(1)
+	}
+
+	agent := NewAIAgent(authBridgeURL, mcpServerURL)
+
+	// Setup HTTP server with separate access log
+	accessLog, err := os.OpenFile("/tmp/aiagent-access.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err != nil {
+		agentLogger.Error("Failed to open access log file", "error", err)
+		os.Exit(1)
+	}
 
 	r := chi.NewRouter()
-	r.Use(middleware.Logger)
+	r.Use(middleware.RequestLogger(&middleware.DefaultLogFormatter{Logger: log.New(accessLog, "", log.LstdFlags)}))
 	r.Use(middleware.Recoverer)
 
 	// Task endpoint
@@ -332,13 +365,17 @@ func main() {
 
 	agentLogger.Info("AI Agent starting",
 		"port", port,
-		"authbridge_url", authBridgeURL)
+		"authbridge_url", authBridgeURL,
+		"mcp_server_url", mcpServerURL)
 
-	log.Printf("AI Agent listening on :%d", port)
-	log.Printf("AuthBridge MCP Proxy URL: %s", authBridgeURL)
+	agentLogger.Info("AI Agent listening",
+		"port", port,
+		"authbridge_url", authBridgeURL,
+		"mcp_server_url", mcpServerURL)
 
 	if err := http.ListenAndServe(fmt.Sprintf(":%d", port), r); err != nil {
-		log.Fatalf("Failed to start server: %v", err)
+		agentLogger.Error("Failed to start server", "error", err)
+		os.Exit(1)
 	}
 }
 

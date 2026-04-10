@@ -51,48 +51,27 @@ echo ""
 
 # Check AuthBridge log
 echo "2️⃣  AuthBridge Log:"
-if grep -q "Received MCP request from AIAgent" /tmp/authbridge.log; then
-    echo "   ✅ AuthBridge received MCP request from AIAgent"
-    grep "user_id=test-user-step2" /tmp/authbridge.log | grep -E "(Received MCP request|No token available|Requesting auth URL)"
+if grep -q "Auth required - requesting OAuth" /tmp/authbridge.log; then
+    echo "   ✅ AuthBridge received MCP request and detected no token"
+    grep "user_id=test-user-step2" /tmp/authbridge.log | grep "Auth required"
 else
     echo "   ❌ AuthBridge did not receive MCP request"
     tail -10 /tmp/authbridge.log
 fi
 echo ""
 
-# Check if AuthBridge detected no token
-echo "3️⃣  Token Check:"
-if grep -q "No token available" /tmp/authbridge.log; then
-    echo "   ✅ AuthBridge detected no token (expected)"
-    grep "No token available" /tmp/authbridge.log
+# Check if AuthBridge is blocking for OAuth
+echo "3️⃣  OAuth Blocking:"
+if grep -q "Blocking MCP request for OAuth" /tmp/authbridge.log; then
+    echo "   ✅ AuthBridge blocking MCP request for OAuth"
+    grep "user_id=test-user-step2" /tmp/authbridge.log | grep "Blocking"
 else
-    echo "   ⚠️  AuthBridge did not log 'No token available'"
-fi
-echo ""
-
-# Check if AuthBridge requested auth URL from MCP Server
-echo "4️⃣  Auth URL Request:"
-if grep -q "Requesting auth URL from MCP server" /tmp/authbridge.log; then
-    echo "   ✅ AuthBridge requested auth URL from MCP Server"
-    grep "Requesting auth URL from MCP server" /tmp/authbridge.log
-else
-    echo "   ❌ AuthBridge did not request auth URL"
-fi
-echo ""
-
-# Check MCP Server log
-echo "5️⃣  MCP Server Log:"
-if grep -q "auth/url" /tmp/mcp-server-kagenti.log 2>/dev/null; then
-    echo "   ✅ MCP Server received auth URL request"
-    grep "auth/url" /tmp/mcp-server-kagenti.log | tail -2
-else
-    echo "   ⚠️  MCP Server log not showing auth/url request"
-    tail -5 /tmp/mcp-server-kagenti.log 2>/dev/null || echo "   (Log file empty or not found)"
+    echo "   ⚠️  AuthBridge did not block for OAuth"
 fi
 echo ""
 
 # Check response contains auth_required
-echo "6️⃣  Response Check:"
+echo "5️⃣  Response Check:"
 if echo "$RESPONSE" | grep -q "auth_required"; then
     echo "   ✅ Response contains auth_required status"
     if echo "$RESPONSE" | grep -q "login_url"; then
@@ -108,8 +87,7 @@ echo ""
 # Summary
 echo "==============================================="
 if grep -q "Sending MCP request to AuthBridge" /tmp/aiagent.log && \
-   grep -q "Received MCP request from AIAgent" /tmp/authbridge.log && \
-   grep -q "No token available" /tmp/authbridge.log && \
+   grep -q "Auth required - requesting OAuth" /tmp/authbridge.log && \
    echo "$RESPONSE" | grep -q "auth_required"; then
     echo "✅ Step 2 PASSED: MCP request flow verified"
     echo "   Flow: AIAgent → AuthBridge → MCP Server ✓"

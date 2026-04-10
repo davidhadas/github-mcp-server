@@ -3,6 +3,7 @@ package oauth
 import (
 	"crypto/tls"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -53,7 +54,7 @@ func TestNewAuthHandler(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			handler, err := NewAuthHandler(tc.cfg, dotcomHost)
+			handler, err := NewAuthHandler(tc.cfg, dotcomHost, slog.Default())
 			require.NoError(t, err)
 			require.NotNil(t, handler)
 
@@ -560,7 +561,7 @@ func TestHandleProtectedResource(t *testing.T) {
 			dotcomHost, err := utils.NewAPIHost("https://api.github.com")
 			require.NoError(t, err)
 
-			handler, err := NewAuthHandler(tc.cfg, dotcomHost)
+			handler, err := NewAuthHandler(tc.cfg, dotcomHost, slog.Default())
 			require.NoError(t, err)
 
 			router := chi.NewRouter()
@@ -607,7 +608,7 @@ func TestRegisterRoutes(t *testing.T) {
 
 	handler, err := NewAuthHandler(&Config{
 		BaseURL: "https://api.example.com",
-	}, dotcomHost)
+	}, dotcomHost, slog.Default())
 	require.NoError(t, err)
 
 	router := chi.NewRouter()
@@ -676,7 +677,7 @@ func TestProtectedResourceResponseFormat(t *testing.T) {
 
 	handler, err := NewAuthHandler(&Config{
 		BaseURL: "https://api.example.com",
-	}, dotcomHost)
+	}, dotcomHost, slog.Default())
 	require.NoError(t, err)
 
 	router := chi.NewRouter()
@@ -810,7 +811,7 @@ func TestAPIHostResolver_AuthorizationServerURL(t *testing.T) {
 			}
 			config.BaseURL = tc.host
 
-			handler, err := NewAuthHandler(config, apiHost)
+			handler, err := NewAuthHandler(config, apiHost, slog.Default())
 			require.NoError(t, err)
 
 			router := chi.NewRouter()

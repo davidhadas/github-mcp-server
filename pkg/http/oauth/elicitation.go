@@ -3,6 +3,7 @@ package oauth
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 
 	"github.com/github/github-mcp-server/pkg/oauth"
@@ -13,10 +14,11 @@ import (
 type ElicitationHandler struct {
 	config  *oauth.ElicitationConfig
 	apiHost utils.APIHostResolver
+	logger  *slog.Logger
 }
 
 // NewElicitationHandler creates a new elicitation handler for HTTP endpoints.
-func NewElicitationHandler(config *oauth.ElicitationConfig, apiHost utils.APIHostResolver) (*ElicitationHandler, error) {
+func NewElicitationHandler(config *oauth.ElicitationConfig, apiHost utils.APIHostResolver, logger *slog.Logger) (*ElicitationHandler, error) {
 	if config == nil {
 		return nil, fmt.Errorf("elicitation config is required")
 	}
@@ -28,6 +30,7 @@ func NewElicitationHandler(config *oauth.ElicitationConfig, apiHost utils.APIHos
 	return &ElicitationHandler{
 		config:  config,
 		apiHost: apiHost,
+		logger:  logger,
 	}, nil
 }
 
@@ -38,6 +41,8 @@ func (h *ElicitationHandler) HandleAuthURL(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+
+	h.logger.Info("Received auth URL request")
 
 	// Parse the request body
 	var req oauth.AuthURLRequest
@@ -62,6 +67,8 @@ func (h *ElicitationHandler) HandleAuthURL(w http.ResponseWriter, r *http.Reques
 		http.Error(w, fmt.Sprintf("Failed to build authorization URL: %v", err), http.StatusInternalServerError)
 		return
 	}
+
+	h.logger.Info("Built authorization URL", "callback_url", req.CallbackURL)
 
 	// Return the response as JSON
 	w.Header().Set("Content-Type", "application/json")

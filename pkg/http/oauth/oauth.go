@@ -4,6 +4,7 @@ package oauth
 
 import (
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -68,7 +69,7 @@ type AuthHandler struct {
 }
 
 // NewAuthHandler creates a new OAuth auth handler.
-func NewAuthHandler(cfg *Config, apiHost utils.APIHostResolver) (*AuthHandler, error) {
+func NewAuthHandler(cfg *Config, apiHost utils.APIHostResolver, logger *slog.Logger) (*AuthHandler, error) {
 	if cfg == nil {
 		cfg = &Config{}
 	}
@@ -91,6 +92,7 @@ func NewAuthHandler(cfg *Config, apiHost utils.APIHostResolver) (*AuthHandler, e
 			cfg.ClientSecret,
 			cfg.ElicitationConfig.RedirectURI,
 			tokenURL,
+			logger,
 		)
 	}
 
@@ -126,7 +128,7 @@ func (h *AuthHandler) RegisterElicitationRoutes(r chi.Router) error {
 		return nil // Elicitation not configured
 	}
 
-	elicitationHandler, err := NewElicitationHandler(h.cfg.ElicitationConfig, h.apiHost)
+	elicitationHandler, err := NewElicitationHandler(h.cfg.ElicitationConfig, h.apiHost, slog.Default())
 	if err != nil {
 		return fmt.Errorf("failed to create elicitation handler: %w", err)
 	}

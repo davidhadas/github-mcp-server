@@ -31,18 +31,11 @@ func init() {
 	}))
 }
 
-// MCPServer represents an MCP server configuration
-type MCPServer struct {
-	Name string `mapstructure:"name"`
-	URL  string `mapstructure:"url"`
-}
-
 // Config holds the service configuration
 type Config struct {
-	Port          int         `mapstructure:"port"`
-	AuthBridgeURL string      `mapstructure:"authbridge_url"`
-	MCPServers    []MCPServer `mapstructure:"mcp_servers"`
-	DemoPagePath  string      `mapstructure:"demo_page_path"`
+	Port          int    `mapstructure:"port"`
+	AuthBridgeURL string `mapstructure:"authbridge_url"`
+	DemoPagePath  string `mapstructure:"demo_page_path"`
 }
 
 func main() {
@@ -53,12 +46,14 @@ func main() {
 	viper.AddConfigPath("./cmd/backend")
 
 	if err := viper.ReadInConfig(); err != nil {
-		log.Fatalf("Error reading config file: %v", err)
+		backendLogger.Error("Error reading config file", "error", err)
+		os.Exit(1)
 	}
 
 	var config Config
 	if err := viper.Unmarshal(&config); err != nil {
-		log.Fatalf("Error unmarshaling config: %v", err)
+		backendLogger.Error("Error unmarshaling config", "error", err)
+		os.Exit(1)
 	}
 
 	// Validate configuration
@@ -71,12 +66,17 @@ func main() {
 
 	backendLogger.Info("Backend service starting",
 		"port", config.Port,
-		"authbridge_url", config.AuthBridgeURL,
-		"servers", len(config.MCPServers))
+		"authbridge_url", config.AuthBridgeURL)
 
-	// Setup HTTP server
+	// Setup HTTP server with separate access log
+	accessLog, err := os.OpenFile("/tmp/backend-access.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err != nil {
+		backendLogger.Error("Failed to open access log file", "error", err)
+		os.Exit(1)
+	}
+
 	r := chi.NewRouter()
-	r.Use(middleware.Logger)
+	r.Use(middleware.RequestLogger(&middleware.DefaultLogFormatter{Logger: log.New(accessLog, "", log.LstdFlags)}))
 	r.Use(middleware.Recoverer)
 	r.Use(corsMiddleware)
 
@@ -153,13 +153,14 @@ func main() {
 		"address", addr,
 		"demo_url", fmt.Sprintf("http://localhost:%d/demo", config.Port))
 
-	log.Printf("Backend Service starting on port %d", config.Port)
-	log.Printf("Architecture: Browser → Backend:%d → AuthBridge:%s → AI Agent → MCP Server",
-		config.Port, config.AuthBridgeURL)
-	log.Printf("Demo page: http://localhost:%d/demo", config.Port)
+	backendLogger.Info("Backend Service starting",
+		"port", config.Port,
+		"architecture", fmt.Sprintf("Browser → Backend:%d → AuthBridge:%s → AI Agent → MCP Server", config.Port, config.AuthBridgeURL),
+		"demo_url", fmt.Sprintf("http://localhost:%d/demo", config.Port))
 
 	if err := http.ListenAndServe(addr, r); err != nil {
-		log.Fatalf("Server failed: %v", err)
+		backendLogger.Error("Server failed", "error", err)
+		os.Exit(1)
 	}
 }
 
@@ -196,17 +197,12 @@ func handleTask(config *Config) http.HandlerFunc {
 			return
 		}
 
-		// Default to first MCP server if not specified
-		if taskReq.MCPServerURL == "" && len(config.MCPServers) > 0 {
-			taskReq.MCPServerURL = config.MCPServers[0].URL
-		}
-
 		backendLogger.Info("Received task from browser",
 			"user_id", taskReq.UserID,
 			"task", taskReq.Task)
 
 		// Forward to AuthBridge
-		backendLogger.Info("→ Forwarding task to AuthBridge",
+		backendLogger.Info("Forwarding task to AuthBridge",
 			"user_id", taskReq.UserID,
 			"authbridge_url", config.AuthBridgeURL)
 
@@ -241,7 +237,7 @@ func handleTask(config *Config) http.HandlerFunc {
 			return
 		}
 
-		backendLogger.Info("← Received result from AuthBridge",
+		backendLogger.Info("Received result from AuthBridge",
 			"user_id", taskReq.UserID,
 			"status", taskResp.Status)
 
@@ -309,7 +305,7 @@ func handleTokenExchange(config *Config) http.HandlerFunc {
 			return
 		}
 
-		backendLogger.Info("Token exchange request received",
+		backendLogger.Info("Token exchange request",
 			"user_id", req.UserID,
 			"mcp_server", req.MCPServerURL)
 

@@ -304,7 +304,6 @@
         const CONFIG = {
             backendUrl: 'http://localhost:8187',
             authBridgeUrl: 'http://localhost:8185',
-            mcpServerUrl: 'http://localhost:8184',
             redirectUri: 'http://localhost:8187/callback'
         };
 
@@ -341,7 +340,6 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         user_id: userId,
-                        mcp_server_url: CONFIG.mcpServerUrl,
                         task: taskDescription
                     })
                 });
