@@ -130,59 +130,120 @@ func NewAIAgent(authBridge *AuthBridgeExtension, userID string) *AIAgent {
 	}
 }
 
-// ExecuteTask simulates an AI agent executing a task that requires MCP server interaction
-// This is where the agent would:
-// 1. Receive a user request
-// 2. Determine which MCP server(s) to use
-// 3. Make MCP requests through AuthBridge
-// 4. Handle OAuth elicitation if needed
-// 5. Retry after authentication
-// 6. Return results to user
-func (agent *AIAgent) ExecuteTask(taskDescription string, mcpServerURL string) (interface{}, error) {
-	slog.Info("AIAgent executing task", "user_id", agent.userID, "task", taskDescription, "mcp_server", mcpServerURL)
-
-	// This is a placeholder for actual agent logic
-	// In a real implementation, this would:
-	// - Parse the task description
-	// - Determine the appropriate MCP method and parameters
-	// - Call the MCP server through AuthBridge
-	// - Handle authentication flows
-	// - Process and return results
-
-	return map[string]interface{}{
-		"status":  "task_received",
-		"message": "AIAgent would process this task",
-		"task":    taskDescription,
-		"user_id": agent.userID,
-	}, nil
+// TaskRequest represents a task from the browser
+type TaskRequest struct {
+	UserID       string                 `json:"user_id"`
+	Task         string                 `json:"task"`
+	MCPServerURL string                 `json:"mcp_server_url"`
+	Params       map[string]interface{} `json:"params,omitempty"`
 }
 
-// RequestMCPOperation makes an MCP request through the AuthBridge
-// This simulates how an agent would interact with MCP servers
-func (agent *AIAgent) RequestMCPOperation(mcpServerURL, method string, params map[string]interface{}) (interface{}, error) {
-	slog.Info("AIAgent requesting MCP operation", "user_id", agent.userID, "mcp_server", mcpServerURL, "method", method)
+// TaskResponse represents the response to a task
+type TaskResponse struct {
+	Status  string      `json:"status"`
+	Message string      `json:"message,omitempty"`
+	Result  interface{} `json:"result,omitempty"`
+	Error   string      `json:"error,omitempty"`
+}
 
-	// Check if we have a token cached
-	token, hasToken := agent.authBridge.tokenCache.GetToken(agent.userID, mcpServerURL)
+// MCPRequest represents an internal MCP request from AIAgent to AuthBridge
+type MCPRequest struct {
+	UserID       string                 `json:"user_id"`
+	MCPServerURL string                 `json:"mcp_server_url"`
+	Method       string                 `json:"method"`
+	Params       map[string]interface{} `json:"params"`
+}
 
-	if !hasToken {
-		// No token - need to trigger OAuth flow
-		slog.Info("AIAgent: No token available, OAuth flow needed", "user_id", agent.userID)
-		return nil, fmt.Errorf("authentication_required")
+// MCPResponse represents the response from MCP server
+type MCPResponse struct {
+	Status       int
+	Body         []byte
+	NeedsAuth    bool
+	AuthURL      string
+	CodeVerifier string
+}
+
+// ExecuteTask processes a task from the browser
+// Flow: Browser → AuthBridge → AIAgent (this method)
+func (agent *AIAgent) ExecuteTask(task TaskRequest) (*TaskResponse, error) {
+	slog.Info("AIAgent executing task", "user_id", agent.userID, "task", task.Task)
+
+	// Convert task to MCP request
+	// In a real implementation, this would use NLP/LLM to determine the right MCP method
+	mcpReq := agent.taskToMCPRequest(task)
+
+	// Make MCP request through AuthBridge
+	mcpResp, err := agent.authBridge.handleInternalMCPRequest(mcpReq)
+	if err != nil {
+		return &TaskResponse{
+			Status: "error",
+			Error:  err.Error(),
+		}, err
 	}
 
-	// Token available - proceed with MCP request
-	slog.Info("AIAgent: Token available, proceeding with MCP request", "user_id", agent.userID)
+	// If authentication needed, this will be handled by AuthBridge
+	// which will send redirect directly to browser
+	if mcpResp.NeedsAuth {
+		return &TaskResponse{
+			Status:  "authentication_required",
+			Message: "OAuth authentication needed",
+		}, nil
+	}
 
-	// This would make the actual MCP request
-	// For now, return a placeholder
-	return map[string]interface{}{
-		"status":       "success",
-		"message":      "MCP operation would be executed here",
-		"method":       method,
-		"has_token":    hasToken,
-		"token_prefix": token[:10] + "...",
-	}, nil
+	// Process MCP response and convert to task result
+	taskResult := agent.mcpResponseToTaskResult(mcpResp, task.Task)
+
+	return taskResult, nil
+}
+
+// taskToMCPRequest converts a task description to an MCP request
+// This is where the AI agent's intelligence would go
+func (agent *AIAgent) taskToMCPRequest(task TaskRequest) MCPRequest {
+	// Simple mock implementation
+	// Real implementation would use LLM to parse task and determine MCP method
+
+	method := "tools/call"
+	params := task.Params
+
+	if params == nil {
+		params = make(map[string]interface{})
+	}
+
+	// Example: if task contains "get user", call get_me
+	// This is a simplified mock - real agent would be much smarter
+	if params["name"] == nil {
+		params["name"] = "get_me" // default tool
+	}
+
+	return MCPRequest{
+		UserID:       agent.userID,
+		MCPServerURL: task.MCPServerURL,
+		Method:       method,
+		Params:       params,
+	}
+}
+
+// mcpResponseToTaskResult converts MCP response to task result
+func (agent *AIAgent) mcpResponseToTaskResult(mcpResp *MCPResponse, taskDesc string) *TaskResponse {
+	if mcpResp.Status != http.StatusOK {
+		return &TaskResponse{
+			Status:  "error",
+			Message: fmt.Sprintf("MCP request failed with status %d", mcpResp.Status),
+			Error:   string(mcpResp.Body),
+		}
+	}
+
+	// Parse MCP response
+	var result interface{}
+	if err := json.Unmarshal(mcpResp.Body, &result); err != nil {
+		result = string(mcpResp.Body)
+	}
+
+	return &TaskResponse{
+		Status:  "success",
+		Message: fmt.Sprintf("Task completed: %s", taskDesc),
+		Result:  result,
+	}
 }
 
 // AuthBridgeExtension manages OAuth flows and token caching for AI agents
@@ -205,6 +266,135 @@ func (abe *AuthBridgeExtension) GetOrCreateAgent(userID string) *AIAgent {
 	abe.agents.Store(userID, agent)
 	slog.Info("Created new AIAgent", "user_id", userID)
 	return agent
+}
+
+// handleInternalMCPRequest processes MCP requests from AIAgent
+// This is an internal method called by AIAgent, not exposed as HTTP endpoint
+func (abe *AuthBridgeExtension) handleInternalMCPRequest(req MCPRequest) (*MCPResponse, error) {
+	slog.Info("AuthBridge processing internal MCP request",
+		"user_id", req.UserID,
+		"mcp_server", req.MCPServerURL,
+		"method", req.Method)
+
+	// Check token cache
+	token, hasToken := abe.tokenCache.GetToken(req.UserID, req.MCPServerURL)
+
+	if !hasToken {
+		// No token - get auth URL from MCP server
+		slog.Info("No token cached, requesting auth URL", "user_id", req.UserID)
+
+		authURLReq := map[string]string{
+			"redirect_uri": abe.config.RedirectURI,
+		}
+		jsonData, _ := json.Marshal(authURLReq)
+
+		mcpResp, err := http.Post(
+			req.MCPServerURL+"/auth/url",
+			"application/json",
+			bytes.NewReader(jsonData),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get auth URL: %v", err)
+		}
+		defer mcpResp.Body.Close()
+
+		body, _ := io.ReadAll(mcpResp.Body)
+		var authResp struct {
+			URL          string `json:"url"`
+			CodeVerifier string `json:"code_verifier"`
+		}
+		json.Unmarshal(body, &authResp)
+
+		// Return auth required response
+		return &MCPResponse{
+			Status:       http.StatusUnauthorized,
+			NeedsAuth:    true,
+			AuthURL:      authResp.URL,
+			CodeVerifier: authResp.CodeVerifier,
+		}, nil
+	}
+
+	// Token exists - make MCP request
+	// For demo, call GitHub API directly
+	slog.Info("Using cached token for MCP request", "user_id", req.UserID, "method", req.Method)
+
+	var apiURL string
+	var apiMethod string = "GET"
+
+	switch req.Method {
+	case "tools/list":
+		// Return tools list
+		result := map[string]interface{}{
+			"tools": []map[string]interface{}{
+				{"name": "get_me", "description": "Get authenticated user info"},
+				{"name": "list_repos", "description": "List user repositories"},
+				{"name": "search_repos", "description": "Search repositories"},
+			},
+		}
+		body, _ := json.Marshal(result)
+		return &MCPResponse{
+			Status: http.StatusOK,
+			Body:   body,
+		}, nil
+
+	case "tools/call":
+		toolName, ok := req.Params["name"].(string)
+		if !ok {
+			return nil, fmt.Errorf("missing tool name in params")
+		}
+
+		switch toolName {
+		case "get_me":
+			apiURL = "https://api.github.com/user"
+		case "list_repos":
+			apiURL = "https://api.github.com/user/repos?sort=updated&per_page=10"
+		case "search_repositories":
+			query := "mcp"
+			if args, ok := req.Params["arguments"].(map[string]interface{}); ok {
+				if q, ok := args["query"].(string); ok {
+					query = q
+				}
+			}
+			apiURL = fmt.Sprintf("https://api.github.com/search/repositories?q=%s&sort=stars&per_page=10", query)
+		default:
+			return nil, fmt.Errorf("unknown tool: %s", toolName)
+		}
+
+	default:
+		return nil, fmt.Errorf("unsupported method: %s", req.Method)
+	}
+
+	// Call GitHub API
+	httpReq, _ := http.NewRequest(apiMethod, apiURL, nil)
+	httpReq.Header.Set("Authorization", "Bearer "+token)
+	httpReq.Header.Set("Accept", "application/vnd.github.v3+json")
+	httpReq.Header.Set("User-Agent", "AuthBridge-Extension")
+
+	client := &http.Client{}
+	apiResp, err := client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call GitHub API: %v", err)
+	}
+	defer apiResp.Body.Close()
+
+	body, _ := io.ReadAll(apiResp.Body)
+
+	// If 401, token expired - delete from cache
+	if apiResp.StatusCode == http.StatusUnauthorized {
+		slog.Info("Token expired, removing from cache", "user_id", req.UserID)
+		abe.tokenCache.DeleteToken(req.UserID, req.MCPServerURL)
+
+		// Return auth required
+		return &MCPResponse{
+			Status:    http.StatusUnauthorized,
+			NeedsAuth: true,
+		}, nil
+	}
+
+	return &MCPResponse{
+		Status: apiResp.StatusCode,
+		Body:   body,
+	}, nil
 }
 
 func main() {
@@ -243,19 +433,22 @@ func main() {
 	r.Use(middleware.Recoverer)
 	r.Use(corsMiddleware)
 
+	// Task endpoint - Primary interface for browser
+	r.Post("/task", authBridge.handleTask)
+
 	// OAuth endpoints
 	r.Post("/auth/url", authBridge.handleAuthURL)
 	r.Post("/oauth/exchange-token", authBridge.handleTokenExchange)
 	r.Get("/callback", authBridge.handleCallback)
 
-	// MCP call endpoint with token caching (for agents)
+	// MCP call endpoint with token caching (legacy, for direct MCP calls)
 	r.Post("/mcp/call", authBridge.handleMCPCall)
 
 	// Token cache management endpoints
 	r.Get("/tokens/status", authBridge.handleTokenStatus)
 	r.Delete("/tokens/{user_id}/{mcp_server}", authBridge.handleDeleteToken)
 
-	// Agent management endpoints (new)
+	// Agent management endpoints
 	r.Post("/agent/task", authBridge.handleAgentTask)
 	r.Get("/agent/status", authBridge.handleAgentStatus)
 
@@ -678,12 +871,92 @@ func (abe *AuthBridgeExtension) handleDeleteToken(w http.ResponseWriter, r *http
 	})
 }
 
-// handleAgentTask handles task requests from clients to AI agents
+// handleTask handles task requests from browser
+// Flow: Browser → AuthBridge (this) → AIAgent → AuthBridge → MCP Server
+func (abe *AuthBridgeExtension) handleTask(w http.ResponseWriter, r *http.Request) {
+	var taskReq TaskRequest
+
+	if err := json.NewDecoder(r.Body).Decode(&taskReq); err != nil {
+		http.Error(w, fmt.Sprintf("Invalid request: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	if taskReq.UserID == "" || taskReq.Task == "" {
+		http.Error(w, "Missing user_id or task", http.StatusBadRequest)
+		return
+	}
+
+	// Default to first MCP server if not specified
+	if taskReq.MCPServerURL == "" && len(abe.config.MCPServers) > 0 {
+		taskReq.MCPServerURL = abe.config.MCPServers[0].URL
+	}
+
+	slog.Info("Received task from browser", "user_id", taskReq.UserID, "task", taskReq.Task)
+
+	// Get or create agent for this user
+	agent := abe.GetOrCreateAgent(taskReq.UserID)
+
+	// Execute task through agent
+	// Agent will convert task to MCP request and call back to AuthBridge
+	result, err := agent.ExecuteTask(taskReq)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Task execution failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// If authentication required, send redirect to browser
+	if result.Status == "authentication_required" {
+		// Get auth URL from agent's last attempt
+		token, _ := abe.tokenCache.GetToken(taskReq.UserID, taskReq.MCPServerURL)
+		if token == "" {
+			// Generate auth URL
+			authURLReq := map[string]string{
+				"redirect_uri": abe.config.RedirectURI,
+			}
+			jsonData, _ := json.Marshal(authURLReq)
+
+			mcpResp, err := http.Post(
+				taskReq.MCPServerURL+"/auth/url",
+				"application/json",
+				bytes.NewReader(jsonData),
+			)
+			if err == nil {
+				defer mcpResp.Body.Close()
+				body, _ := io.ReadAll(mcpResp.Body)
+				var authResp struct {
+					URL          string `json:"url"`
+					CodeVerifier string `json:"code_verifier"`
+				}
+				json.Unmarshal(body, &authResp)
+
+				// Return auth required with URL
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"error":         "authentication_required",
+					"error_message": "OAuth authentication needed",
+					"login_url":     authResp.URL,
+					"code_verifier": authResp.CodeVerifier,
+					"user_id":       taskReq.UserID,
+					"mcp_server":    taskReq.MCPServerURL,
+				})
+				return
+			}
+		}
+	}
+
+	// Return task result
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
+// handleAgentTask handles task requests from clients to AI agents (legacy endpoint)
 func (abe *AuthBridgeExtension) handleAgentTask(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		UserID       string `json:"user_id"`
-		Task         string `json:"task"`
-		MCPServerURL string `json:"mcp_server_url"`
+		UserID       string                 `json:"user_id"`
+		Task         string                 `json:"task"`
+		MCPServerURL string                 `json:"mcp_server_url"`
+		Params       map[string]interface{} `json:"params,omitempty"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -696,11 +969,19 @@ func (abe *AuthBridgeExtension) handleAgentTask(w http.ResponseWriter, r *http.R
 		return
 	}
 
+	// Convert to TaskRequest and forward to handleTask
+	taskReq := TaskRequest{
+		UserID:       req.UserID,
+		Task:         req.Task,
+		MCPServerURL: req.MCPServerURL,
+		Params:       req.Params,
+	}
+
 	// Get or create agent for this user
 	agent := abe.GetOrCreateAgent(req.UserID)
 
 	// Execute task through agent
-	result, err := agent.ExecuteTask(req.Task, req.MCPServerURL)
+	result, err := agent.ExecuteTask(taskReq)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Agent task failed: %v", err), http.StatusInternalServerError)
 		return
