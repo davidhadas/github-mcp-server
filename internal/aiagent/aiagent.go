@@ -149,18 +149,18 @@ func (agent *AIAgent) taskToMCPRequest(task TaskRequest) MCPRequest {
 
 	// Detect task intent and map to appropriate MCP tool
 	if params["name"] == nil {
-		// List tools
-		if strings.Contains(taskLower, "list") && (strings.Contains(taskLower, "tool") || strings.Contains(taskLower, "available")) {
+		// Check for repository-related tasks first (more specific)
+		if strings.Contains(taskLower, "repo") || strings.Contains(taskLower, "repositories") {
+			params["name"] = "list_repos"
+		} else if strings.Contains(taskLower, "list") && (strings.Contains(taskLower, "tool") || strings.Contains(taskLower, "available")) {
+			// List tools
 			method = "tools/list"
 			params = make(map[string]interface{}) // tools/list doesn't need params
-		} else if strings.Contains(taskLower, "list") && strings.Contains(taskLower, "repo") {
-			// List repositories
-			params["name"] = "list_repos"
-		} else if strings.Contains(taskLower, "profile") || strings.Contains(taskLower, "me") || strings.Contains(taskLower, "my") {
+		} else if strings.Contains(taskLower, "profile") || strings.Contains(taskLower, "who am i") {
 			// Get user profile
 			params["name"] = "get_me"
 		} else {
-			// Default to get_me
+			// Default to get_me for tasks mentioning "me" or "my"
 			params["name"] = "get_me"
 		}
 	}
