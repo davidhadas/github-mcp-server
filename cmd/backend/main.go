@@ -80,14 +80,11 @@ func main() {
 	r.Use(middleware.Recoverer)
 	r.Use(corsMiddleware)
 
-	// Task endpoint - Primary interface for browser
+	// Task endpoint - Primary interface for browser (may include OAuth code)
 	r.Post("/task", handleTask(&config))
 
 	// OAuth callback endpoint
 	r.Get("/callback", handleCallback(&config))
-
-	// OAuth token exchange endpoint
-	r.Post("/oauth/exchange-token", handleTokenExchange(&config))
 
 	// Serve demo page if configured
 	if config.DemoPagePath != "" {
@@ -183,7 +180,13 @@ func corsMiddleware(next http.Handler) http.Handler {
 // handleTask handles task requests from browser and forwards to AuthBridge
 func handleTask(config *Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var taskReq aiagent.TaskRequest
+		var taskReq struct {
+			aiagent.TaskRequest
+			// OAuth fields for token exchange (handled by AuthBridge, not forwarded to AI Agent)
+			OAuthCode    string `json:"oauth_code,omitempty"`
+			CodeVerifier string `json:"code_verifier,omitempty"`
+			MCPServerURL string `json:"mcp_server_url,omitempty"`
+		}
 
 		if err := json.NewDecoder(r.Body).Decode(&taskReq); err != nil {
 			backendLogger.Error("Invalid task request", "error", err.Error())
@@ -199,9 +202,11 @@ func handleTask(config *Config) http.HandlerFunc {
 
 		backendLogger.Info("Received task from browser",
 			"user_id", taskReq.UserID,
-			"task", taskReq.Task)
+			"task", taskReq.Task,
+			"has_oauth_code", taskReq.OAuthCode != "")
 
-		// Forward to AuthBridge
+		// Forward entire request to AuthBridge (including OAuth fields if present)
+		// AuthBridge will handle token exchange and resume blocked MCP request
 		backendLogger.Info("Forwarding task to AuthBridge",
 			"user_id", taskReq.UserID,
 			"authbridge_url", config.AuthBridgeURL)

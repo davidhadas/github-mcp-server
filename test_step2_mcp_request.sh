@@ -1,3 +1,4 @@
+   ⚠️  MCP Server log not showing auth URL request
 #!/bin/bash
 
 # Test Step 2: Verify AIAgent sends MCP request to MCP Server (without token)

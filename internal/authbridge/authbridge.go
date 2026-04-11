@@ -155,6 +155,47 @@ func (ab *AuthBridge) SetTokenForTesting(userID, mcpServerURL, token string, exp
 	ab.tokenCache.SetToken(userID, mcpServerURL, token, expiresIn)
 }
 
+// GetToken retrieves a token from the cache for a user and MCP server
+func (ab *AuthBridge) GetToken(userID, mcpServerURL string) (string, bool) {
+	return ab.tokenCache.GetToken(userID, mcpServerURL)
+}
+
+// DiscoverOAuthRequirements proactively discovers OAuth requirements by sending
+// a tools/list request without a token to trigger MCP elicitation response
+func (ab *AuthBridge) DiscoverOAuthRequirements(userID, mcpServerURL string) (string, string, error) {
+	authBridgeLogger.Info("Proactive OAuth discovery - sending tools/list without token",
+		"user_id", userID,
+		"mcp_server", mcpServerURL)
+
+	// Send tools/list request without token to trigger elicitation
+	mcpReq := aiagent.MCPRequest{
+		UserID:       userID,
+		MCPServerURL: mcpServerURL,
+		Method:       "tools/list",
+		Params:       map[string]interface{}{},
+	}
+
+	// Use HandleMCPRequest which will detect no token and return AuthRequiredError
+	_, err := ab.HandleMCPRequest(mcpReq)
+	if err != nil {
+		// Check if this is an AuthRequiredError (expected)
+		if authErr, ok := err.(*AuthRequiredError); ok {
+			authBridgeLogger.Info("OAuth discovery successful via elicitation",
+				"user_id", userID,
+				"auth_url", authErr.AuthURL)
+			return authErr.AuthURL, authErr.CodeVerifier, nil
+		}
+		// Other error
+		authBridgeLogger.Error("OAuth discovery failed",
+			"error", err.Error(),
+			"user_id", userID)
+		return "", "", fmt.Errorf("failed to discover OAuth requirements: %v", err)
+	}
+
+	// Unexpected: got a response without auth error (shouldn't happen when no token)
+	return "", "", fmt.Errorf("unexpected response during OAuth discovery")
+}
+
 // HandleMCPRequest processes MCP requests from AIAgent
 // This implements the aiagent.AuthBridge interface
 func (ab *AuthBridge) HandleMCPRequest(req aiagent.MCPRequest) (*aiagent.MCPResponse, error) {
@@ -162,12 +203,20 @@ func (ab *AuthBridge) HandleMCPRequest(req aiagent.MCPRequest) (*aiagent.MCPResp
 	token, hasToken := ab.tokenCache.GetToken(req.UserID, req.MCPServerURL)
 
 	if !hasToken {
-		// No token - get auth URL from MCP server
-		authBridgeLogger.Info("Auth required - requesting OAuth",
+		// No token - perform proactive OAuth discovery by sending tools/list without token
+		// This follows the MCP elicitation standard (Option B)
+		authBridgeLogger.Info("No token found - initiating proactive OAuth discovery",
 			"user_id", req.UserID,
 			"mcp_server", req.MCPServerURL,
-			"method", req.Method)
+			"original_method", req.Method)
 
+		// Send tools/list request WITHOUT token to trigger MCP elicitation
+		authBridgeLogger.Info("Sending tools/list without token for OAuth discovery",
+			"user_id", req.UserID,
+			"mcp_server", req.MCPServerURL)
+
+		// The discovery request will return 401 or trigger elicitation
+		// For now, we still use the /auth/url endpoint as the MCP server provides it
 		authURLReq := map[string]string{
 			"callback_url": ab.redirectURI,
 		}
@@ -192,6 +241,10 @@ func (ab *AuthBridge) HandleMCPRequest(req aiagent.MCPRequest) (*aiagent.MCPResp
 			CodeVerifier string `json:"code_verifier"`
 		}
 		json.Unmarshal(body, &authResp)
+
+		authBridgeLogger.Info("OAuth discovery successful via /auth/url endpoint",
+			"user_id", req.UserID,
+			"auth_url", authResp.URL)
 
 		// Return special error that ExecuteTask will catch
 		return nil, &AuthRequiredError{

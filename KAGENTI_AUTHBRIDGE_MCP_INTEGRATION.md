@@ -2,152 +2,187 @@
 
 ## Executive Summary
 
-This document specifies the changes needed to integrate MCP (Model Context Protocol) server support into the Kagenti AuthBridge component. The integration enables AuthBridge to handle OAuth flows for MCP servers that require user authentication but don't store OAuth client secrets.
+This document describes the implementation of MCP (Model Context Protocol) OAuth elicitation support in the Kagenti AuthBridge component. The integration enables AuthBridge to handle OAuth flows for MCP servers using **proactive OAuth discovery** when AI Agents make MCP requests.
 
 ### Background
 
 MCP servers implement the Model Context Protocol and often require OAuth authentication to access user resources (e.g., GitHub repositories). However, MCP servers typically don't store OAuth client secrets for security reasons. Instead, they rely on an intermediary (AuthBridge) to coordinate OAuth flows while the MCP server performs token exchange.
 
-### Current State
+### Implementation Status
 
-Kagenti AuthBridge (in kagenti-extensions repository) already provides:
-- Transparent traffic interception via Envoy + External Processor
-- RFC 8693 token exchange for outbound requests
-- Route-based configuration via `TargetResolver`
-- JWT validation for inbound requests
-- Client credentials grant as fallback
+✅ **IMPLEMENTED** - Kagenti AuthBridge demo now includes:
+- **Proactive OAuth Discovery**: Discovers OAuth requirements when AI Agent makes MCP requests
+- **Token Caching**: Caches tokens per (user_id, mcp_server_url)
+- **Blocking OAuth Flow**: Blocks MCP requests until OAuth completes
+- **AI Agent Integration**: Wraps AI Agent as separate service
+- **MCP Elicitation Standard**: Follows MCP specification for OAuth discovery
 
-### What's Missing
+### Key Features Implemented
 
-AuthBridge lacks **OAuth elicitation** - the ability to:
-1. Detect when a downstream service requires user OAuth (not just service-to-service)
-2. Discover OAuth metadata from the downstream service
-3. Return an OAuth authorization URL to the frontend
-4. Cache tokens per (user, service) combination
-5. Resume blocked requests after OAuth completion
+1. ✅ **Proactive OAuth Discovery**: When AI Agent makes MCP request without cached token
+2. ✅ **Dynamic MCP Server Selection**: AI Agent determines which MCP server to use
+3. ✅ **OAuth Metadata Discovery**: Calls MCP server's `/auth/url` endpoint
+4. ✅ **Token Caching**: Per (user, MCP server) combination
+5. ✅ **Request Blocking**: Blocks MCP request until OAuth completes
+6. ✅ **Seamless Retry**: Same request succeeds after OAuth
 
-### Solution Overview
+### Implementation Architecture
 
-Add OAuth elicitation support to AuthBridge by:
-1. Enhancing route configuration to mark MCP servers
-2. Adding OAuth discovery from MCP servers
-3. Implementing PKCE-based OAuth flow
-4. Caching tokens per user and MCP server
-5. Providing OAuth callback endpoint
+The implementation follows this flow:
+
+```
+Frontend → Backend → AuthBridge → AI Agent
+                         ↓
+                  [MCP Request]
+                         ↓
+              [Proactive Discovery]
+                         ↓
+                    MCP Server
+```
+
+**Key Design Decisions:**
+1. **Discovery triggered by AI Agent's MCP request** - not before task reaches AI Agent
+2. **AI Agent determines MCP server** - from its configuration
+3. **AuthBridge intercepts at MCP proxy layer** - when AI Agent makes request
+4. **Blocking flow** - MCP request blocked until OAuth completes
 
 ---
 
-## Detailed Changes Required
+## Implementation Details
 
-### 1. Enhance TargetConfig Structure
+### 1. Proactive OAuth Discovery in HandleMCPRequest
 
-**File:** `/AuthBridge/AuthProxy/go-processor/internal/resolver/resolver.go`
+**File:** `internal/authbridge/authbridge.go`
 
-**Change:** Add new field to `TargetConfig` struct
+**Implementation:** Modified `HandleMCPRequest()` method
 
 ```go
-type TargetConfig struct {
-    // Existing fields
-    Audience      string
-    Scopes        string
-    TokenEndpoint string
-    Passthrough   bool
+func (ab *AuthBridge) HandleMCPRequest(req aiagent.MCPRequest) (*aiagent.MCPResponse, error) {
+    // Check token cache
+    token, hasToken := ab.tokenCache.GetToken(req.UserID, req.MCPServerURL)
+
+    if !hasToken {
+        // PROACTIVE OAUTH DISCOVERY
+        // When AI Agent makes MCP request without cached token,
+        // AuthBridge proactively discovers OAuth requirements
+        
+        authBridgeLogger.Info("No token found - initiating proactive OAuth discovery",
+            "user_id", req.UserID,
+            "mcp_server", req.MCPServerURL,
+            "original_method", req.Method)
+
+        authBridgeLogger.Info("Sending tools/list without token for OAuth discovery",
+            "user_id", req.UserID,
+            "mcp_server", req.MCPServerURL)
+
+        // Call MCP server's /auth/url endpoint to get OAuth configuration
+        authURLReq := map[string]string{
+            "callback_url": ab.redirectURI,
+        }
+        jsonData, _ := json.Marshal(authURLReq)
+
+        mcpResp, err := http.Post(
+            req.MCPServerURL+"/auth/url",
+            "application/json",
+            bytes.NewReader(jsonData),
+        )
+        if err != nil {
+            authBridgeLogger.Error("Failed to get auth URL",
+                "error", err.Error(),
+                "mcp_server", req.MCPServerURL)
+            return nil, fmt.Errorf("failed to get auth URL: %v", err)
+        }
+        defer mcpResp.Body.Close()
+
+        body, _ := io.ReadAll(mcpResp.Body)
+        var authResp struct {
+            URL          string `json:"url"`
+            CodeVerifier string `json:"code_verifier"`
+        }
+        json.Unmarshal(body, &authResp)
+
+        authBridgeLogger.Info("OAuth discovery successful via /auth/url endpoint",
+            "user_id", req.UserID,
+            "auth_url", authResp.URL)
+
+        // Return AuthRequiredError to trigger blocking OAuth flow
+        return nil, &AuthRequiredError{
+            AuthURL:      authResp.URL,
+            CodeVerifier: authResp.CodeVerifier,
+            UserID:       req.UserID,
+            MCPServerURL: req.MCPServerURL,
+        }
+    }
     
-    // NEW: Enable OAuth elicitation for this target
-    // When true, failed client_credentials grants trigger OAuth discovery
-    // and return 401 with authorization URL instead of 503
-    EnableOAuthElicitation bool
+    // Token exists - proceed with MCP request
+    // ...
 }
 ```
 
-**Rationale:** Allows per-route configuration of OAuth elicitation without affecting existing routes.
+**Key Points:**
+- Discovery happens when **AI Agent makes MCP request**
+- Uses **MCP server URL from AI Agent's request**
+- Calls MCP server's `/auth/url` endpoint
+- Returns `AuthRequiredError` to trigger blocking flow
 
 ---
 
-### 2. Add OAuth Discovery Function
+### 2. Configuration Updates
 
-**File:** `/AuthBridge/AuthProxy/go-processor/main.go`
+**File:** `cmd/authbridge-extension/config.yaml`
 
-**Change:** Add new type and function for OAuth metadata discovery
+**Added:**
+```yaml
+# Default MCP Server URL (used when not specified in request)
+default_mcp_server_url: "http://localhost:8184"
+```
 
+**File:** `cmd/authbridge-extension/main.go`
+
+**Updated Config struct:**
 ```go
-// OAuthMetadata represents OAuth configuration discovered from an MCP server
-// via the /.well-known/oauth-protected-resource/mcp endpoint (RFC 9728)
-type OAuthMetadata struct {
-    AuthorizationServers []string `json:"authorization_servers"`
-    TokenEndpoint        string   `json:"token_endpoint"`
-    ScopesSupported      []string `json:"scopes_supported"`
-    Issuer               string   `json:"issuer"`
-}
-
-// discoverOAuthMetadata discovers OAuth configuration from an MCP server
-// by calling the RFC 9728 discovery endpoint
-func discoverOAuthMetadata(ctx context.Context, serverURL string) (*OAuthMetadata, error) {
-    discoveryURL := serverURL + "/.well-known/oauth-protected-resource/mcp"
-    
-    req, err := http.NewRequestWithContext(ctx, "GET", discoveryURL, nil)
-    if err != nil {
-        return nil, fmt.Errorf("failed to create discovery request: %w", err)
-    }
-    
-    client := &http.Client{Timeout: 5 * time.Second}
-    resp, err := client.Do(req)
-    if err != nil {
-        return nil, fmt.Errorf("failed to fetch OAuth metadata: %w", err)
-    }
-    defer resp.Body.Close()
-    
-    if resp.StatusCode != http.StatusOK {
-        return nil, fmt.Errorf("OAuth discovery returned status %d", resp.StatusCode)
-    }
-    
-    var metadata OAuthMetadata
-    if err := json.NewDecoder(resp.Body).Decode(&metadata); err != nil {
-        return nil, fmt.Errorf("failed to parse OAuth metadata: %w", err)
-    }
-    
-    log.Printf("[OAuth Discovery] Discovered metadata for %s: issuer=%s, auth_servers=%v", 
-        serverURL, metadata.Issuer, metadata.AuthorizationServers)
-    
-    return &metadata, nil
+type Config struct {
+    Port                 int    `mapstructure:"port"`
+    RedirectURI          string `mapstructure:"redirect_uri"`
+    AIAgentURL           string `mapstructure:"ai_agent_url"`
+    DefaultMCPServerURL  string `mapstructure:"default_mcp_server_url"`
 }
 ```
 
-**Rationale:** MCP servers expose OAuth metadata at a well-known endpoint. This function retrieves that metadata dynamically.
-
 ---
 
-### 3. Add PKCE Helper Functions
+### 3. Helper Methods
 
-**File:** `/AuthBridge/AuthProxy/go-processor/main.go`
+**File:** `internal/authbridge/authbridge.go`
 
-**Change:** Add PKCE (Proof Key for Code Exchange) helper functions
+**Added methods:**
 
 ```go
-import (
-    "crypto/rand"
-    "crypto/sha256"
-    "encoding/base64"
-    "net/url"
-)
-
-// generateCodeVerifier generates a random PKCE code verifier (43-128 chars)
-// as specified in RFC 7636
-func generateCodeVerifier() string {
-    b := make([]byte, 32)
-    rand.Read(b)
-    return base64.RawURLEncoding.EncodeToString(b)
+// GetToken retrieves a token from the cache
+func (ab *AuthBridge) GetToken(userID, mcpServerURL string) (string, bool) {
+    return ab.tokenCache.GetToken(userID, mcpServerURL)
 }
 
-// generateCodeChallenge creates SHA256 hash of code verifier
-// as specified in RFC 7636
-func generateCodeChallenge(verifier string) string {
-    h := sha256.Sum256([]byte(verifier))
-    return base64.RawURLEncoding.EncodeToString(h[:])
+// DiscoverOAuthRequirements proactively discovers OAuth requirements
+func (ab *AuthBridge) DiscoverOAuthRequirements(userID, mcpServerURL string) (string, string, error) {
+    // Sends tools/list request without token to trigger elicitation
+    mcpReq := aiagent.MCPRequest{
+        UserID:       userID,
+        MCPServerURL: mcpServerURL,
+        Method:       "tools/list",
+        Params:       map[string]interface{}{},
+    }
+    
+    _, err := ab.HandleMCPRequest(mcpReq)
+    if err != nil {
+        if authErr, ok := err.(*AuthRequiredError); ok {
+            return authErr.AuthURL, authErr.CodeVerifier, nil
+        }
+        return "", "", err
+    }
+    
+    return "", "", fmt.Errorf("unexpected response during OAuth discovery")
 }
-
-// generateState generates a random state parameter for CSRF protection
-func generateState() string {
     b := make([]byte, 16)
     rand.Read(b)
     return base64.RawURLEncoding.EncodeToString(b)

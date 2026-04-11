@@ -13,12 +13,14 @@ Browser → AuthBridge Extension (port 8185) → MCP Server (port 8184) → OAut
 ## Features
 
 - **Provider-Agnostic**: Works with any OAuth 2.0 provider (GitHub, GitLab, etc.)
-- **AI Agent Support**: Includes mock AI Agent component for task orchestration
-- **Dynamic Discovery**: Discovers OAuth metadata from MCP servers
+- **AI Agent Support**: Wraps AI Agent as a separate service for task orchestration
+- **Proactive OAuth Discovery**: Automatically discovers OAuth requirements when AI Agent makes MCP requests
+- **Dynamic Discovery**: Discovers OAuth metadata from MCP servers using MCP elicitation standard
 - **Token Caching**: Caches tokens per (user_id, mcp_server_url) for seamless retry
 - **PKCE Support**: Implements RFC 7636 for enhanced security
 - **Multi-Provider**: Supports multiple OAuth providers simultaneously
 - **Session Management**: Manages OAuth sessions for multiple users
+- **Blocking OAuth Flow**: Blocks MCP requests until OAuth completes, AI Agent never sees 401 errors
 
 ## Configuration
 
@@ -77,45 +79,90 @@ The AuthBridge Extension will:
 - `GET /demo` - Serve demo page (if configured)
 - `GET /health` - Health check
 
-## OAuth Flow with Token Caching
+## OAuth Flow with Proactive Discovery and Token Caching
 
-1. **Initial Request**: Agent makes MCP request without token
+1. **Task Submission**: Frontend sends task to Backend
    ```
-   POST /mcp/call
+   POST /task
+   {
+     "user_id": "alice@example.com",
+     "task": "Get my GitHub profile",
+     "mcp_server_url": "http://localhost:8184"
+   }
+   ```
+
+2. **Task Forwarding**: Backend → AuthBridge → AI Agent
+   - AuthBridge forwards task to AI Agent (separate service)
+   - AI Agent converts task to MCP request
+
+3. **MCP Request**: AI Agent makes MCP request to AuthBridge MCP proxy
+   ```
+   POST /mcp
    {
      "user_id": "alice@example.com",
      "mcp_server_url": "http://localhost:8184",
      "method": "tools/call",
-     "params": {...}
+     "params": {"name": "get_me"}
    }
    ```
 
-2. **No Token**: AuthBridge returns 401 with login URL
+4. **Proactive OAuth Discovery**: AuthBridge detects no cached token
+   - Logs: "No token found - initiating proactive OAuth discovery"
+   - Logs: "Sending tools/list without token for OAuth discovery"
+   - Calls MCP server's `/auth/url` endpoint
+   - Logs: "OAuth discovery successful via /auth/url endpoint"
+   - Blocks the MCP request
+
+5. **Auth Required Response**: AuthBridge returns to Frontend via AI Agent → Backend
    ```json
    {
-     "error": "authentication_required",
-     "login_url": "https://github.com/login/oauth/authorize?...",
-     "code_verifier": "..."
+     "status": "auth_required",
+     "message": "OAuth authentication needed",
+     "result": {
+       "login_url": "https://github.com/login/oauth/authorize?...",
+       "code_verifier": "...",
+       "user_id": "alice@example.com",
+       "mcp_server_url": "http://localhost:8184"
+     }
    }
    ```
 
-3. **User Authorization**: User authorizes on OAuth provider
+6. **User Authorization**: Frontend redirects user to OAuth provider
 
-4. **Token Exchange**: AuthBridge exchanges code for token and caches it
+7. **OAuth Callback**: Backend receives OAuth code, sends task again with code
    ```
-   POST /oauth/exchange-token
+   POST /task
    {
-     "code": "...",
+     "user_id": "alice@example.com",
+     "task": "Get my GitHub profile",
+     "oauth_code": "...",
      "code_verifier": "...",
-     "user_id": "alice@example.com"
+     "mcp_server_url": "http://localhost:8184"
    }
    ```
 
-5. **Retry**: Agent retries original request - AuthBridge uses cached token
-   ```
-   POST /mcp/call (same request as step 1)
-   → Success! Token retrieved from cache
-   ```
+8. **Token Exchange**: AuthBridge exchanges code for token and caches it
+   - Forwards to MCP server's `/oauth/exchange-token` endpoint
+   - Caches token internally (never exposed to Backend or AI Agent)
+
+9. **Task Execution**: AuthBridge forwards task to AI Agent
+   - AI Agent makes MCP request again
+   - AuthBridge uses cached token
+   - Request succeeds!
+
+## Key Improvements
+
+### Proactive OAuth Discovery
+- **Discovery happens when AI Agent makes MCP request** (not before)
+- **AI Agent determines which MCP server to use** (from its configuration)
+- **No fake requests needed** - uses actual MCP request from AI Agent
+- **Standards-compliant** - follows MCP elicitation protocol
+
+### Blocking OAuth Flow
+- **AI Agent never sees 401 errors** - AuthBridge handles all OAuth
+- **MCP request is blocked** until OAuth completes
+- **Seamless retry** - same request succeeds after OAuth
+- **Token isolation** - tokens never leave AuthBridge
 
 ## AI Agent Component
 
