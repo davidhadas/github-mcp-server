@@ -384,7 +384,7 @@
         }
 
         async function handleOAuthCallback(code) {
-            showStatus('info', '🔄 Exchanging authorization code for access token...');
+            showStatus('info', '🔄 Processing OAuth callback...');
             
             try {
                 const authDataStr = sessionStorage.getItem('pending_auth');
@@ -393,57 +393,54 @@
                 }
                 
                 const authData = JSON.parse(authDataStr);
+                sessionStorage.removeItem('pending_auth');
                 
-                // Exchange code for token (this will cache it server-side)
-                const response = await fetch(CONFIG.backendUrl + '/oauth/exchange-token', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        code: code,
-                        code_verifier: authData.code_verifier,
-                        mcp_server_url: authData.mcp_server_url,
-                        user_id: authData.user_id
-                    })
-                });
+                showStatus('success', '✅ OAuth authorization complete! Retrying your task...');
                 
-                if (!response.ok) {
-                    const errorText = await response.text();
-                    throw new Error(`Token exchange failed: ${response.status} - ${errorText}`);
-                }
-                
-                const data = await response.json();
-                
-                if (data.success) {
-                    sessionStorage.removeItem('pending_auth');
-                    showStatus('success', '✅ Successfully authenticated! Token cached. Retrying your task...');
+                // Check if there's a pending task to retry
+                const pendingTaskStr = sessionStorage.getItem('pending_task');
+                if (pendingTaskStr) {
+                    const pendingTaskData = JSON.parse(pendingTaskStr);
+                    sessionStorage.removeItem('pending_task');
                     
-                    // Check if there's a pending task to retry
-                    const pendingTaskStr = sessionStorage.getItem('pending_task');
-                    if (pendingTaskStr) {
-                        const pendingTaskData = JSON.parse(pendingTaskStr);
-                        sessionStorage.removeItem('pending_task');
-                        
-                        // Restore the user_id in the input field
-                        if (pendingTaskData.user_id) {
-                            document.getElementById('userId').value = pendingTaskData.user_id;
-                        }
-                        
-                        // Retry the original task with the correct user_id
-                        setTimeout(() => {
-                            submitTask(pendingTaskData.task);
-                        }, 500);
-                    } else {
-                        // No pending task, just show success
-                        setTimeout(() => {
-                            checkTokenCache();
-                            document.getElementById('taskResult').innerHTML = '<p style="color: #28a745; padding: 15px; background: #e8f5e9; border-radius: 6px;">✅ Authentication complete! You can now submit agent tasks.</p>';
-                        }, 500);
+                    // Restore the user_id in the input field
+                    if (pendingTaskData.user_id) {
+                        document.getElementById('userId').value = pendingTaskData.user_id;
                     }
+                    
+                    // Retry the original task - this time include OAuth code
+                    // Backend will forward to AuthBridge with the code for token exchange
+                    setTimeout(async () => {
+                        const response = await fetch(CONFIG.backendUrl + '/task', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                user_id: pendingTaskData.user_id,
+                                task: pendingTaskData.task,
+                                oauth_code: code,
+                                code_verifier: authData.code_verifier,
+                                mcp_server_url: authData.mcp_server_url
+                            })
+                        });
+                        
+                        const data = await response.json();
+                        
+                        if (response.ok && data.status === 'success') {
+                            showStatus('success', '✅ Task completed successfully!');
+                            document.getElementById('taskResult').innerHTML = '<pre>' + JSON.stringify(data, null, 2) + '</pre>';
+                        } else {
+                            throw new Error(data.error || 'Task failed');
+                        }
+                    }, 500);
                 } else {
-                    throw new Error('No access token received');
+                    // No pending task, just show success
+                    setTimeout(() => {
+                        checkTokenCache();
+                        document.getElementById('taskResult').innerHTML = '<p style="color: #28a745; padding: 15px; background: #e8f5e9; border-radius: 6px;">✅ Authentication complete! You can now submit agent tasks.</p>';
+                    }, 500);
                 }
             } catch (error) {
-                showStatus('error', 'Token exchange failed: ' + error.message);
+                showStatus('error', 'OAuth callback failed: ' + error.message);
                 console.error('OAuth error:', error);
             }
         }
