@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-config
+  namespace: kagenti-demo
+data:
+  backend-config.yaml: |
+    # Backend Service Configuration for Kubernetes
+    port: 8187
+    # In sidecar mode, backend talks directly to AI Agent pod
+    authbridge_url: "http://aiagent-service:8186"
+    # Demo page path (mounted from ConfigMap)
+    demo_page_path: "/app/oauth-demo-kagenti.html"
+
+# Made with Bob

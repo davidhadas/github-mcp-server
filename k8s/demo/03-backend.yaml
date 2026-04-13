@@ -1,0 +1,74 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: kagenti-demo
+  labels:
+    app: backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      containers:
+      - name: backend
+        image: localhost/kagenti/backend:demo
+        imagePullPolicy: Never  # Use local image from Kind
+        ports:
+        - name: http
+          containerPort: 8187
+          protocol: TCP
+        env:
+        - name: AI_AGENT_URL
+          value: "http://aiagent-service:8186"
+        - name: LOG_LEVEL
+          value: "info"
+        volumeMounts:
+        - name: config
+          mountPath: /config
+          readOnly: true
+        - name: demo-page
+          mountPath: /app/oauth-demo-kagenti.html
+          subPath: oauth-demo-kagenti.html
+          readOnly: true
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+      
+      volumes:
+      - name: config
+        configMap:
+          name: backend-config
+      - name: demo-page
+        configMap:
+          name: demo-page
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-service
+  namespace: kagenti-demo
+  labels:
+    app: backend
+spec:
+  type: NodePort
+  ports:
+  - name: http
+    port: 8187
+    targetPort: 8187
+    nodePort: 30187
+    protocol: TCP
+  selector:
+    app: backend
+
+# Made with Bob

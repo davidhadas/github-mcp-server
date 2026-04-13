@@ -1,0 +1,568 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: demo-page
+  namespace: kagenti-demo
+data:
+  oauth-demo-kagenti.html: |
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>GitHub MCP Server - OAuth Demo (Hybrid Approach)</title>
+        <style>
+            * {
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }
+            
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                min-height: 100vh;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                padding: 20px;
+            }
+            
+            .container {
+                background: white;
+                border-radius: 12px;
+                box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+                max-width: 1000px;
+                width: 100%;
+                padding: 40px;
+            }
+            
+            h1 {
+                color: #333;
+                margin-bottom: 10px;
+                font-size: 28px;
+            }
+            
+            .subtitle {
+                color: #666;
+                margin-bottom: 20px;
+                font-size: 14px;
+            }
+
+            .architecture {
+                background: #f0f7ff;
+                border: 2px solid #4a90e2;
+                border-radius: 8px;
+                padding: 15px;
+                margin-bottom: 20px;
+                font-family: monospace;
+                font-size: 12px;
+            }
+
+            .architecture-title {
+                font-weight: bold;
+                color: #4a90e2;
+                margin-bottom: 10px;
+            }
+
+            .hybrid-info {
+                background: #fff3cd;
+                border: 2px solid #ffc107;
+                border-radius: 8px;
+                padding: 15px;
+                margin-bottom: 20px;
+                font-size: 13px;
+            }
+
+            .hybrid-title {
+                font-weight: bold;
+                color: #856404;
+                margin-bottom: 8px;
+            }
+            
+            .status {
+                padding: 15px;
+                border-radius: 8px;
+                margin-bottom: 20px;
+                font-weight: 500;
+            }
+            
+            .status.info {
+                background: #e3f2fd;
+                color: #1976d2;
+                border-left: 4px solid #1976d2;
+            }
+            
+            .status.success {
+                background: #e8f5e9;
+                color: #388e3c;
+                border-left: 4px solid #388e3c;
+            }
+            
+            .status.error {
+                background: #ffebee;
+                color: #c62828;
+                border-left: 4px solid #c62828;
+            }
+            
+            button {
+                background: #667eea;
+                color: white;
+                border: none;
+                padding: 12px 24px;
+                border-radius: 6px;
+                font-size: 16px;
+                font-weight: 600;
+                cursor: pointer;
+                transition: all 0.3s;
+                margin-right: 10px;
+                margin-bottom: 10px;
+            }
+            
+            button:hover {
+                background: #5568d3;
+                transform: translateY(-2px);
+                box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+            }
+            
+            button:disabled {
+                background: #ccc;
+                cursor: not-allowed;
+                transform: none;
+            }
+
+            button.secondary {
+                background: #6c757d;
+            }
+
+            button.secondary:hover {
+                background: #5a6268;
+            }
+
+            button.danger {
+                background: #dc3545;
+            }
+
+            button.danger:hover {
+                background: #c82333;
+            }
+            
+            .section {
+                margin-bottom: 30px;
+                padding: 20px;
+                background: #f8f9fa;
+                border-radius: 8px;
+            }
+            
+            .section h2 {
+                color: #333;
+                font-size: 18px;
+                margin-bottom: 15px;
+            }
+            
+            pre {
+                background: #2d2d2d;
+                color: #f8f8f2;
+                padding: 15px;
+                border-radius: 6px;
+                overflow-x: auto;
+                font-size: 13px;
+                line-height: 1.5;
+                max-height: 400px;
+            }
+            
+            .input-group {
+                margin-bottom: 15px;
+            }
+
+            .input-group label {
+                display: block;
+                margin-bottom: 5px;
+                font-weight: 600;
+                color: #333;
+            }
+
+            .input-group input {
+                width: 100%;
+                padding: 10px;
+                border: 2px solid #ddd;
+                border-radius: 6px;
+                font-size: 14px;
+            }
+
+            .input-group input:focus {
+                outline: none;
+                border-color: #667eea;
+            }
+
+            .token-cache-status {
+                background: white;
+                padding: 15px;
+                border-radius: 6px;
+                border: 2px solid #28a745;
+                margin-top: 15px;
+            }
+
+            .cache-item {
+                padding: 8px;
+                background: #f8f9fa;
+                border-radius: 4px;
+                margin-bottom: 8px;
+                font-family: monospace;
+                font-size: 12px;
+            }
+            
+            .loading {
+                display: inline-block;
+                width: 20px;
+                height: 20px;
+                border: 3px solid #f3f3f3;
+                border-top: 3px solid #667eea;
+                border-radius: 50%;
+                animation: spin 1s linear infinite;
+                margin-left: 10px;
+            }
+            
+            @keyframes spin {
+                0% { transform: rotate(0deg); }
+                100% { transform: rotate(360deg); }
+            }
+
+            .endpoint-info {
+                background: #fff;
+                padding: 10px;
+                border-radius: 4px;
+                margin: 10px 0;
+                font-size: 13px;
+                border-left: 3px solid #667eea;
+            }
+
+            .endpoint-label {
+                font-weight: bold;
+                color: #667eea;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🤖 KAgentI AI Agent Demo</h1>
+            <p class="subtitle">Task-Based Architecture: Browser sends tasks, AI Agent orchestrates MCP calls</p>
+            
+            <div class="architecture">
+                <div class="architecture-title">🏗️ KAgentI Architecture (4 Processes):</div>
+                <div>Browser (this page) ← Stores Keycloak session token only</div>
+                <div>    ↓ POST /task (task description)</div>
+                <div>Backend (port 8187) ← Serves frontend, handles OAuth callbacks</div>
+                <div>    ↓ HTTP POST /task</div>
+                <div>AuthBridge (port 8185) ← OAuth coordination + token caching</div>
+                <div>    ↓ HTTP POST /task</div>
+                <div>AI Agent (port 8186) ← Converts task to MCP request</div>
+                <div>    ↓ HTTP POST /mcp</div>
+                <div>AuthBridge (port 8185) ← MCP proxy with token injection</div>
+                <div>    ↓ MCP Protocol + Bearer token</div>
+                <div>MCP Server (port 8184) ← OAuth discovery + token exchange</div>
+            </div>
+
+            <div class="hybrid-info">
+                <div class="hybrid-title">✨ Task-Based Architecture Benefits:</div>
+                <div>• Browser: Sends natural language tasks, not MCP requests</div>
+                <div>• AI Agent: Converts tasks to appropriate MCP tool calls</div>
+                <div>• AuthBridge: Handles OAuth and token caching transparently</div>
+                <div>• Secure: Multi-tenant isolation, server-side token storage</div>
+            </div>
+            
+            <div id="status" class="status info">
+                Ready to submit agent tasks. Enter a user ID and describe what you want to do.<br>
+                <small style="margin-top: 8px; display: block;">⚠️ Make sure all 4 services are running: Backend (8187), AuthBridge (8185), AI Agent (8186), MCP Server (8184).</small>
+            </div>
+            
+            <div class="section">
+                <h2>Step 1: User Identity (Simulated Keycloak Session)</h2>
+                <div class="input-group">
+                    <label for="userId">User ID:</label>
+                    <input type="text" id="userId" placeholder="e.g., demo-user-123" value="demo-user-123">
+                    <small style="color: #666; display: block; margin-top: 5px;">
+                        In production, this would come from your Keycloak session token
+                    </small>
+                </div>
+            </div>
+            
+            <div class="section">
+                <h2>Step 2: Submit Agent Tasks</h2>
+                <p style="margin-bottom: 15px;">Click a button to submit a task to the AI Agent. If no token is cached, you'll be automatically redirected to GitHub for authentication.</p>
+                
+                <button onclick="submitTask('List all available GitHub tools')">📋 List Available Tools</button>
+                <button onclick="submitTask('Get my GitHub profile information')">👤 Get My GitHub Info</button>
+                <button onclick="submitTask('Show me all my GitHub repositories')">📚 List My Repositories</button>
+                
+                <div id="taskResult" style="margin-top: 20px;"></div>
+            </div>
+
+            <div class="section">
+                <h2>Step 3: Token Cache Management</h2>
+                <button class="secondary" onclick="checkTokenCache()">🔍 Check Token Cache</button>
+                <button class="danger" onclick="clearTokenCache()">🗑️ Clear My Cached Token</button>
+                
+                <div id="cacheStatus"></div>
+            </div>
+        </div>
+
+        <script>
+            const CONFIG = {
+                backendUrl: 'http://localhost:8187',
+                authBridgeUrl: 'http://localhost:8185',
+                redirectUri: 'http://localhost:8187/callback'
+            };
+
+            let pendingAuthData = null;
+            let pendingTask = null;
+            
+            window.addEventListener('load', async () => {
+                const urlParams = new URLSearchParams(window.location.search);
+                const code = urlParams.get('code');
+                const state = urlParams.get('state');
+                
+                if (code && state) {
+                    handleOAuthCallback(code);
+                    window.history.replaceState({}, document.title, window.location.pathname);
+                }
+            });
+
+            async function submitTask(taskDescription) {
+                const userId = document.getElementById('userId').value.trim();
+                if (!userId) {
+                    showStatus('error', 'Please enter a User ID');
+                    return;
+                }
+
+                const resultDiv = document.getElementById('taskResult');
+                resultDiv.innerHTML = '<div class="loading"></div> Processing task...';
+                
+                try {
+                    showStatus('info', `🤖 Submitting task: "${taskDescription}"...`);
+                    
+                    const response = await fetch(CONFIG.backendUrl + '/task', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            user_id: userId,
+                            task: taskDescription
+                        })
+                    });
+                    
+                    const data = await response.json();
+                    console.log('Response data:', data);
+                    
+                    if (data.status === 'error' && data.error) {
+                        console.log('Detected error response, parsing...');
+                        try {
+                            const errorData = JSON.parse(data.error);
+                            console.log('Parsed error data:', errorData);
+                            if (errorData.auth_url) {
+                                console.log('OAuth required, redirecting to:', errorData.auth_url);
+                                showStatus('info', '🔐 No token cached. Redirecting to GitHub for authentication...');
+                                resultDiv.innerHTML = '<p style="color: #856404;">⚠️ Redirecting to GitHub...</p>';
+                                
+                                sessionStorage.setItem('pending_auth', JSON.stringify({
+                                    code_verifier: errorData.code_verifier,
+                                    mcp_server_url: errorData.mcp_server_url,
+                                    login_url: errorData.auth_url
+                                }));
+                                
+                                sessionStorage.setItem('pending_task', JSON.stringify({
+                                    user_id: userId,
+                                    task: taskDescription
+                                }));
+                                
+                                let loginUrl = errorData.auth_url;
+                                if (!loginUrl.includes('prompt=')) {
+                                    loginUrl += '&prompt=select_account';
+                                }
+                                
+                                setTimeout(() => {
+                                    window.location.href = loginUrl;
+                                }, 1000);
+                                return;
+                            }
+                        } catch (e) {
+                        }
+                    }
+                    
+                    if (response.status === 401 && data.error === 'authentication_required') {
+                        console.log('OAuth required, auth data:', data);
+                        showStatus('info', '🔐 No token cached. Redirecting to GitHub for authentication...');
+                        resultDiv.innerHTML = '<p style="color: #856404;">⚠️ Redirecting to GitHub...</p>';
+                        
+                        sessionStorage.setItem('pending_auth', JSON.stringify({
+                            code_verifier: data.code_verifier,
+                            mcp_server_url: data.mcp_server_url
+                        }));
+                        sessionStorage.setItem('pending_task', JSON.stringify({
+                            user_id: userId,
+                            task: taskDescription
+                        }));
+                        
+                        let loginUrl = data.auth_url;
+                        if (!loginUrl.includes('prompt=')) {
+                            loginUrl += '&prompt=select_account';
+                        }
+                        
+                        setTimeout(() => {
+                            window.location.href = loginUrl;
+                        }, 1000);
+                    } else if (response.ok) {
+                        showStatus('success', `✅ Task completed successfully! (Token was cached)`);
+                        resultDiv.innerHTML = '<pre>' + JSON.stringify(data, null, 2) + '</pre>';
+                    } else {
+                        throw new Error(data.error || 'Task failed');
+                    }
+                    
+                } catch (error) {
+                    showStatus('error', `Failed to process task: ${error.message}`);
+                    resultDiv.innerHTML = '<p style="color: #c62828;">❌ Error: ' + error.message + '</p>';
+                    console.error('Task error:', error);
+                }
+            }
+
+            async function handleOAuthCallback(code) {
+                showStatus('info', '🔄 Retrying task with authorization code...');
+                
+                try {
+                    const authDataStr = sessionStorage.getItem('pending_auth');
+                    const pendingTaskStr = sessionStorage.getItem('pending_task');
+                    
+                    if (!authDataStr || !pendingTaskStr) {
+                        throw new Error('No pending authentication or task data found');
+                    }
+                    
+                    const authData = JSON.parse(authDataStr);
+                    const pendingTask = JSON.parse(pendingTaskStr);
+                    
+                    console.log('Retrying task with OAuth code:', {
+                        user_id: pendingTask.user_id,
+                        task: pendingTask.task,
+                        has_code: !!code,
+                        has_verifier: !!authData.code_verifier
+                    });
+                    
+                    const response = await fetch(CONFIG.backendUrl + '/task', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            user_id: pendingTask.user_id,
+                            task: pendingTask.task,
+                            oauth_code: code,
+                            code_verifier: authData.code_verifier,
+                            mcp_server_url: authData.mcp_server_url
+                        })
+                    });
+                    
+                    const data = await response.json();
+                    console.log('Task retry response:', data);
+                    
+                    sessionStorage.removeItem('pending_auth');
+                    sessionStorage.removeItem('pending_task');
+                    
+                    if (response.ok) {
+                        showStatus('success', '✅ Task completed successfully! (Token was cached by sidecar)');
+                        document.getElementById('taskResult').innerHTML = '<pre>' + JSON.stringify(data, null, 2) + '</pre>';
+                    } else {
+                        throw new Error(`Task failed: ${response.status} - ${JSON.stringify(data)}`);
+                    }
+                } catch (error) {
+                    showStatus('error', 'Task retry failed: ' + error.message);
+                    console.error('Task retry error:', error);
+                }
+            }
+
+            async function checkTokenCache() {
+                const userId = document.getElementById('userId').value.trim();
+                if (!userId) {
+                    showStatus('error', 'Please enter a User ID');
+                    return;
+                }
+
+                const cacheDiv = document.getElementById('cacheStatus');
+                cacheDiv.innerHTML = '<div class="loading"></div> Checking cache...';
+                
+                try {
+                    const response = await fetch(
+                        `${CONFIG.authBridgeUrl}/tokens/status?user_id=${encodeURIComponent(userId)}`
+                    );
+                    
+                    if (!response.ok) {
+                        throw new Error(`Failed to check cache: ${response.status}`);
+                    }
+                    
+                    const data = await response.json();
+                    
+                    let html = '<div class="token-cache-status">';
+                    html += `<div style="font-weight: 600; margin-bottom: 10px;">Token Cache Status for: ${data.user_id}</div>`;
+                    html += `<div style="margin-bottom: 10px;">Cached Tokens: <strong>${data.token_count}</strong></div>`;
+                    
+                    if (data.mcp_servers && data.mcp_servers.length > 0) {
+                        html += '<div style="font-weight: 600; margin-top: 10px; margin-bottom: 5px;">MCP Servers:</div>';
+                        data.mcp_servers.forEach(server => {
+                            html += `<div class="cache-item">✅ ${server}</div>`;
+                        });
+                    } else {
+                        html += '<div style="color: #856404; margin-top: 10px;">⚠️ No tokens cached for this user</div>';
+                    }
+                    
+                    html += '</div>';
+                    cacheDiv.innerHTML = html;
+                    
+                } catch (error) {
+                    cacheDiv.innerHTML = '<p style="color: #c62828;">❌ Error: ' + error.message + '</p>';
+                    console.error('Cache check error:', error);
+                }
+            }
+
+            async function clearTokenCache() {
+                const userId = document.getElementById('userId').value.trim();
+                if (!userId) {
+                    showStatus('error', 'Please enter a User ID');
+                    return;
+                }
+
+                if (!confirm(`Clear cached token for user "${userId}"?`)) {
+                    return;
+                }
+                
+                try {
+                    const response = await fetch(
+                        `${CONFIG.authBridgeUrl}/tokens/${encodeURIComponent(userId)}/${encodeURIComponent(CONFIG.mcpServerUrl)}`,
+                        { method: 'DELETE' }
+                    );
+                    
+                    if (!response.ok) {
+                        throw new Error(`Failed to clear cache: ${response.status}`);
+                    }
+                    
+                    showStatus('success', '✅ Token cache cleared. Submit a task to automatically re-authenticate.');
+                    document.getElementById('cacheStatus').innerHTML = '';
+                    document.getElementById('taskResult').innerHTML = `
+                        <div style="background: #e3f2fd; padding: 15px; border-radius: 6px; border: 2px solid #1976d2;">
+                            <p style="margin-bottom: 10px; font-weight: 600;">ℹ️ Token Cleared</p>
+                            <p style="font-size: 14px;">
+                                Your cached token has been removed. Submit any task above and you'll be automatically redirected to GitHub for re-authentication.
+                            </p>
+                        </div>
+                    `;
+                    
+                } catch (error) {
+                    showStatus('error', 'Failed to clear cache: ' + error.message);
+                    console.error('Cache clear error:', error);
+                }
+            }
+
+            function showStatus(type, message) {
+                const statusDiv = document.getElementById('status');
+                statusDiv.className = `status ${type}`;
+                statusDiv.innerHTML = message;
+            }
+        </script>
+    </body>
+    </html>
+
+# Made with Bob

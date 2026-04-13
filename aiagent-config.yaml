@@ -1,6 +1,0 @@
-# AI Agent Configuration
-port: 8186
-authbridge_url: "http://localhost:8185/mcp"
-mcp_server_url: "http://localhost:8184"
-
-# Made with Bob

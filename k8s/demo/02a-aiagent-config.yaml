@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aiagent-config
+  namespace: kagenti-demo
+data:
+  aiagent-config.yaml: |
+    # AI Agent Configuration for Kubernetes with Sidecar
+    port: 8186
+    # Sidecar mode: AI Agent sends directly to MCP server, sidecar intercepts via iptables
+    use_sidecar: true
+    # MCP Server URL - traffic will be intercepted by sidecar transparently
+    mcp_server_url: "http://mcp-server-service:8184/mcp"
+
+# Made with Bob

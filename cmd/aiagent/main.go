@@ -17,26 +17,46 @@ import (
 	"github.com/spf13/viper"
 )
 
+// Build-time variables
+var (
+	version = "dev"
+	commit  = "unknown"
+	date    = "unknown"
+)
+
 // Logger for AI Agent
 var agentLogger *slog.Logger
 
 func init() {
-	// Create separate log file for AI Agent
-	logFile, err := os.OpenFile("/tmp/aiagent.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
-	if err != nil {
-		panic(fmt.Sprintf("Failed to open aiagent log file: %v", err))
+	// Use environment variable for log path, default to /var/log/aiagent.log
+	// If that fails, fall back to stdout
+	logPath := os.Getenv("AIAGENT_LOG_PATH")
+	if logPath == "" {
+		logPath = "/var/log/aiagent.log"
 	}
 
-	agentLogger = slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{
+	var logWriter io.Writer = os.Stdout
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err != nil {
+		// Fall back to stdout if file creation fails
+		fmt.Fprintf(os.Stderr, "Warning: Failed to open aiagent log file %s: %v, using stdout\n", logPath, err)
+	} else {
+		logWriter = logFile
+	}
+
+	agentLogger = slog.New(slog.NewTextHandler(logWriter, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	}))
 }
 
 // TaskRequest represents a task from the browser
 type TaskRequest struct {
-	UserID string                 `json:"user_id"`
-	Task   string                 `json:"task"`
-	Params map[string]interface{} `json:"params,omitempty"`
+	UserID       string                 `json:"user_id"`
+	Task         string                 `json:"task"`
+	Params       map[string]interface{} `json:"params,omitempty"`
+	OAuthCode    string                 `json:"oauth_code,omitempty"`     // OAuth authorization code from callback
+	CodeVerifier string                 `json:"code_verifier,omitempty"`  // PKCE code verifier
+	MCPServerURL string                 `json:"mcp_server_url,omitempty"` // MCP server URL for OAuth
 }
 
 // TaskResponse represents the response to a task
@@ -63,21 +83,22 @@ type MCPResponse struct {
 
 // AIAgent handles task orchestration
 type AIAgent struct {
-	authBridgeURL string // URL of AuthBridge MCP proxy
-	mcpServerURL  string // URL of MCP server (configured, not from frontend)
+	mcpServerURL string // URL of MCP server - sidecar will intercept traffic transparently
 }
 
 // NewAIAgent creates a new AI Agent instance
-func NewAIAgent(authBridgeURL, mcpServerURL string) *AIAgent {
+func NewAIAgent(mcpServerURL string) *AIAgent {
 	return &AIAgent{
-		authBridgeURL: authBridgeURL,
-		mcpServerURL:  mcpServerURL,
+		mcpServerURL: mcpServerURL,
 	}
 }
 
 // HandleTask processes a task request
 func (agent *AIAgent) HandleTask(w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
+
+	// Extract user ID from header (set by frontend/sidecar)
+	userIDFromHeader := r.Header.Get("X-User-ID")
 
 	var taskReq TaskRequest
 	if err := json.NewDecoder(r.Body).Decode(&taskReq); err != nil {
@@ -86,9 +107,16 @@ func (agent *AIAgent) HandleTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agentLogger.Info("Received task from AuthBridge",
+	// Use header user ID if task doesn't have one
+	if taskReq.UserID == "" && userIDFromHeader != "" {
+		taskReq.UserID = userIDFromHeader
+	}
+
+	agentLogger.Info("Received task",
 		"user_id", taskReq.UserID,
-		"task", taskReq.Task)
+		"user_id_from_header", userIDFromHeader,
+		"task", taskReq.Task,
+		"has_oauth_code", taskReq.OAuthCode != "")
 
 	// Convert task to MCP request
 	mcpReq := agent.taskToMCPRequest(taskReq)
@@ -96,13 +124,13 @@ func (agent *AIAgent) HandleTask(w http.ResponseWriter, r *http.Request) {
 		"method", mcpReq.Method,
 		"params", mcpReq.Params)
 
-	// Make MCP request to AuthBridge proxy
-	agentLogger.Info("Sending MCP request to AuthBridge proxy",
-		"url", agent.authBridgeURL,
+	// Make MCP request directly to MCP server (sidecar will intercept)
+	agentLogger.Info("Sending MCP request to MCP server (sidecar will intercept)",
+		"url", agent.mcpServerURL,
 		"user_id", mcpReq.UserID,
 		"method", mcpReq.Method)
 
-	mcpResp, err := agent.makeMCPRequest(mcpReq)
+	mcpResp, err := agent.makeMCPRequestWithOAuth(mcpReq, taskReq.OAuthCode, taskReq.CodeVerifier, taskReq.MCPServerURL)
 	if err != nil {
 		agentLogger.Error("MCP request failed", "error", err.Error())
 		http.Error(w, fmt.Sprintf("MCP request failed: %v", err), http.StatusInternalServerError)
@@ -161,14 +189,52 @@ func (agent *AIAgent) taskToMCPRequest(task TaskRequest) MCPRequest {
 	}
 }
 
-// makeMCPRequest sends an MCP request to AuthBridge proxy
-func (agent *AIAgent) makeMCPRequest(mcpReq MCPRequest) (*MCPResponse, error) {
-	reqBody, err := json.Marshal(mcpReq)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal MCP request: %w", err)
+// makeMCPRequestWithOAuth sends an MCP JSON-RPC request directly to MCP server
+// The sidecar will transparently intercept this request via iptables
+// If OAuth parameters are provided, they are passed as headers for the sidecar to detect
+func (agent *AIAgent) makeMCPRequestWithOAuth(mcpReq MCPRequest, oauthCode, codeVerifier, mcpServerURL string) (*MCPResponse, error) {
+	// Send raw MCP JSON-RPC request directly to MCP server
+	mcpJSONRPC := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  mcpReq.Method,
+		"params":  mcpReq.Params,
 	}
 
-	resp, err := http.Post(agent.authBridgeURL, "application/json", bytes.NewReader(reqBody))
+	reqBody, err := json.Marshal(mcpJSONRPC)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal MCP JSON-RPC request: %w", err)
+	}
+
+	agentLogger.Info("Sending MCP JSON-RPC request",
+		"url", mcpReq.MCPServerURL,
+		"method", mcpReq.Method,
+		"user_id", mcpReq.UserID,
+		"has_oauth_code", oauthCode != "")
+
+	// Create HTTP request with user context header for sidecar
+	httpReq, err := http.NewRequest("POST", mcpReq.MCPServerURL, bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-User-ID", mcpReq.UserID) // Sidecar will use this for OAuth
+
+	// Pass OAuth parameters as headers for sidecar to detect
+	if oauthCode != "" {
+		httpReq.Header.Set("X-OAuth-Code", oauthCode)
+		agentLogger.Info("Added OAuth code header for sidecar")
+	}
+	if codeVerifier != "" {
+		httpReq.Header.Set("X-Code-Verifier", codeVerifier)
+		agentLogger.Info("Added code verifier header for sidecar")
+	}
+	if mcpServerURL != "" {
+		httpReq.Header.Set("X-MCP-Server-URL", mcpServerURL)
+		agentLogger.Info("Added MCP server URL header for sidecar", "url", mcpServerURL)
+	}
+
+	resp, err := http.DefaultClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send MCP request: %w", err)
 	}
@@ -326,9 +392,16 @@ func (agent *AIAgent) formatRepositoriesList(rawResult interface{}) interface{} 
 }
 
 func main() {
+	// Log build info
+	agentLogger.Info("AI Agent starting",
+		"version", version,
+		"commit", commit,
+		"build_time", date)
+
 	// Load configuration
 	viper.SetConfigName("aiagent-config")
 	viper.SetConfigType("yaml")
+	viper.AddConfigPath("/config") // Kubernetes ConfigMap mount
 	viper.AddConfigPath(".")
 	viper.AddConfigPath("./cmd/aiagent")
 
@@ -342,28 +415,30 @@ func main() {
 		port = 8186
 	}
 
-	authBridgeURL := viper.GetString("authbridge_url")
-	if authBridgeURL == "" {
-		authBridgeURL = "http://localhost:8185/mcp"
-	}
-
 	mcpServerURL := viper.GetString("mcp_server_url")
 	if mcpServerURL == "" {
 		agentLogger.Error("mcp_server_url must be configured in aiagent-config.yaml")
 		os.Exit(1)
 	}
 
-	agent := NewAIAgent(authBridgeURL, mcpServerURL)
+	agent := NewAIAgent(mcpServerURL)
 
 	// Setup HTTP server with separate access log
-	accessLog, err := os.OpenFile("/tmp/aiagent-access.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	accessLogPath := os.Getenv("AIAGENT_ACCESS_LOG_PATH")
+	if accessLogPath == "" {
+		accessLogPath = "/var/log/aiagent-access.log"
+	}
+
+	var accessLogWriter io.Writer = os.Stdout
+	accessLog, err := os.OpenFile(accessLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 	if err != nil {
-		agentLogger.Error("Failed to open access log file", "error", err)
-		os.Exit(1)
+		agentLogger.Warn("Failed to open access log file, using stdout", "error", err, "path", accessLogPath)
+	} else {
+		accessLogWriter = accessLog
 	}
 
 	r := chi.NewRouter()
-	r.Use(middleware.RequestLogger(&middleware.DefaultLogFormatter{Logger: log.New(accessLog, "", log.LstdFlags)}))
+	r.Use(middleware.RequestLogger(&middleware.DefaultLogFormatter{Logger: log.New(accessLogWriter, "", log.LstdFlags)}))
 	r.Use(middleware.Recoverer)
 
 	// Task endpoint
@@ -375,14 +450,12 @@ func main() {
 		w.Write([]byte("OK"))
 	})
 
-	agentLogger.Info("AI Agent starting",
+	agentLogger.Info("AI Agent starting (sidecar mode)",
 		"port", port,
-		"authbridge_url", authBridgeURL,
 		"mcp_server_url", mcpServerURL)
 
-	agentLogger.Info("AI Agent listening",
+	agentLogger.Info("AI Agent listening (sidecar mode)",
 		"port", port,
-		"authbridge_url", authBridgeURL,
 		"mcp_server_url", mcpServerURL)
 
 	if err := http.ListenAndServe(fmt.Sprintf(":%d", port), r); err != nil {

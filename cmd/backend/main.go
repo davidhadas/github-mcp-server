@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"runtime/debug"
+	"time"
 
 	"github.com/github/github-mcp-server/internal/aiagent"
 	"github.com/go-chi/chi/v5"
@@ -16,17 +18,19 @@ import (
 	"github.com/spf13/viper"
 )
 
-// Logger for Backend with separate log file
+// Build-time variables
+var (
+	version = "dev"
+	commit  = "unknown"
+	date    = "unknown"
+)
+
+// Logger for Backend
 var backendLogger *slog.Logger
 
 func init() {
-	// Create separate log file for Backend
-	logFile, err := os.OpenFile("/tmp/backend.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
-	if err != nil {
-		panic(fmt.Sprintf("Failed to open backend log file: %v", err))
-	}
-
-	backendLogger = slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{
+	// Log to stdout for Kubernetes
+	backendLogger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	}))
 }
@@ -39,9 +43,16 @@ type Config struct {
 }
 
 func main() {
+	// Log version to verify code deployment
+	backendLogger.Info("Backend starting",
+		"version", version,
+		"commit", commit,
+		"build_time", date)
+
 	// Load configuration
 	viper.SetConfigName("backend-config")
 	viper.SetConfigType("yaml")
+	viper.AddConfigPath("/config") // Kubernetes ConfigMap mount
 	viper.AddConfigPath(".")
 	viper.AddConfigPath("./cmd/backend")
 
@@ -68,23 +79,18 @@ func main() {
 		"port", config.Port,
 		"authbridge_url", config.AuthBridgeURL)
 
-	// Setup HTTP server with separate access log
-	accessLog, err := os.OpenFile("/tmp/backend-access.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
-	if err != nil {
-		backendLogger.Error("Failed to open access log file", "error", err)
-		os.Exit(1)
-	}
-
+	// Setup HTTP server with access log to stdout
 	r := chi.NewRouter()
-	r.Use(middleware.RequestLogger(&middleware.DefaultLogFormatter{Logger: log.New(accessLog, "", log.LstdFlags)}))
+	r.Use(middleware.RequestLogger(&middleware.DefaultLogFormatter{Logger: log.New(os.Stdout, "", log.LstdFlags)}))
 	r.Use(middleware.Recoverer)
 	r.Use(corsMiddleware)
 
 	// Task endpoint - Primary interface for browser (may include OAuth code)
 	r.Post("/task", handleTask(&config))
 
-	// OAuth callback endpoint
+	// OAuth callback endpoints (both paths for compatibility)
 	r.Get("/callback", handleCallback(&config))
+	r.Get("/oauth/callback", handleCallback(&config))
 
 	// Serve demo page if configured
 	if config.DemoPagePath != "" {
@@ -177,12 +183,21 @@ func corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// handleTask handles task requests from browser and forwards to AuthBridge
+// handleTask handles task requests from browser and forwards to AI Agent
 func handleTask(config *Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if r := recover(); r != nil {
+				backendLogger.Error("PANIC in handleTask", "panic", r, "stack", string(debug.Stack()))
+				http.Error(w, "Internal server error", http.StatusInternalServerError)
+			}
+		}()
+
 		var taskReq struct {
-			aiagent.TaskRequest
-			// OAuth fields for token exchange (handled by AuthBridge, not forwarded to AI Agent)
+			UserID string                 `json:"user_id"`
+			Task   string                 `json:"task"`
+			Params map[string]interface{} `json:"params,omitempty"`
+			// OAuth fields for sidecar to detect and handle
 			OAuthCode    string `json:"oauth_code,omitempty"`
 			CodeVerifier string `json:"code_verifier,omitempty"`
 			MCPServerURL string `json:"mcp_server_url,omitempty"`
@@ -205,64 +220,166 @@ func handleTask(config *Config) http.HandlerFunc {
 			"task", taskReq.Task,
 			"has_oauth_code", taskReq.OAuthCode != "")
 
-		// Forward entire request to AuthBridge (including OAuth fields if present)
-		// AuthBridge will handle token exchange and resume blocked MCP request
-		backendLogger.Info("Forwarding task to AuthBridge",
-			"user_id", taskReq.UserID,
-			"authbridge_url", config.AuthBridgeURL)
+		// Check if this is an OAuth completion request (has OAuth code)
+		if taskReq.OAuthCode != "" && taskReq.CodeVerifier != "" {
+			backendLogger.Info("OAuth completion request - sending to sidecar",
+				"user_id", taskReq.UserID,
+				"mcp_server", taskReq.MCPServerURL)
 
-		reqBody, err := json.Marshal(taskReq)
-		if err != nil {
-			backendLogger.Error("Failed to marshal task request", "error", err.Error())
+			// Send OAuth completion request to sidecar with headers
+			// This will resume the suspended request
+			targetURL := config.AuthBridgeURL + "/oauth-complete"
+			req, err := http.NewRequest("POST", targetURL, nil)
+			if err != nil {
+				backendLogger.Error("Failed to create OAuth completion request", "error", err.Error())
+				http.Error(w, fmt.Sprintf("Failed to create request: %v", err), http.StatusInternalServerError)
+				return
+			}
+
+			// Set OAuth parameters as headers
+			req.Header.Set("X-OAuth-Code", taskReq.OAuthCode)
+			req.Header.Set("X-Code-Verifier", taskReq.CodeVerifier)
+			req.Header.Set("X-User-ID", taskReq.UserID)
+			req.Header.Set("X-MCP-Server-URL", taskReq.MCPServerURL)
+			req.Header.Set("Content-Type", "application/json")
+
+			backendLogger.Info("Sending OAuth completion request",
+				"target_url", targetURL,
+				"user_id", taskReq.UserID)
+
+			client := &http.Client{}
+			resp, err := client.Do(req)
+			if err != nil {
+				backendLogger.Error("Failed to send OAuth completion request",
+					"error", err.Error())
+				http.Error(w, fmt.Sprintf("Failed to complete OAuth: %v", err), http.StatusInternalServerError)
+				return
+			}
+			defer resp.Body.Close()
+
+			// The sidecar will have resumed the suspended request and returned the MCP response
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				backendLogger.Error("Failed to read OAuth completion response", "error", err.Error())
+				http.Error(w, "Failed to read response", http.StatusInternalServerError)
+				return
+			}
+
+			backendLogger.Info("OAuth completion successful, returning result",
+				"user_id", taskReq.UserID,
+				"status_code", resp.StatusCode)
+
+			// Return the result to browser
 			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{"error": "Failed to marshal task request"})
+			w.WriteHeader(resp.StatusCode)
+			w.Write(body)
 			return
 		}
 
-		resp, err := http.Post(config.AuthBridgeURL+"/task", "application/json", bytes.NewReader(reqBody))
+		// Normal task request (no OAuth code) - forward to AI Agent
+		backendLogger.Info("Forwarding task to AI Agent",
+			"user_id", taskReq.UserID,
+			"aiagent_url", config.AuthBridgeURL)
+
+		// Create simple request body with just user_id and task
+		simpleReq := struct {
+			UserID string `json:"user_id"`
+			Task   string `json:"task"`
+		}{
+			UserID: taskReq.UserID,
+			Task:   taskReq.Task,
+		}
+
+		reqBody, err := json.Marshal(simpleReq)
 		if err != nil {
-			backendLogger.Error("Failed to forward task to AuthBridge",
+			backendLogger.Error("Failed to marshal task request", "error", err.Error())
+			http.Error(w, fmt.Sprintf("Failed to marshal request: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		targetURL := config.AuthBridgeURL + "/task"
+		req, err := http.NewRequest("POST", targetURL, bytes.NewReader(reqBody))
+		if err != nil {
+			backendLogger.Error("Failed to create request", "error", err.Error())
+			http.Error(w, fmt.Sprintf("Failed to create request: %v", err), http.StatusInternalServerError)
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-User-ID", taskReq.UserID)
+
+		backendLogger.Info("Sending task request",
+			"target_url", targetURL,
+			"user_id", taskReq.UserID)
+
+		client := &http.Client{}
+		resp, err := client.Do(req)
+
+		backendLogger.Info("Task request returned",
+			"has_error", err != nil,
+			"timestamp", time.Now().Format(time.RFC3339Nano))
+
+		if err != nil {
+			backendLogger.Error("Failed to forward task to AI Agent",
 				"error", err.Error(),
-				"authbridge_url", config.AuthBridgeURL)
+				"error_type", fmt.Sprintf("%T", err),
+				"aiagent_url", config.AuthBridgeURL,
+				"timestamp", time.Now().Format(time.RFC3339Nano))
 			http.Error(w, fmt.Sprintf("Failed to forward task: %v", err), http.StatusInternalServerError)
 			return
 		}
 		defer resp.Body.Close()
 
+		backendLogger.Info("Received response from AI Agent",
+			"status_code", resp.StatusCode,
+			"content_type", resp.Header.Get("Content-Type"),
+			"timestamp", time.Now().Format(time.RFC3339Nano))
+
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
-			backendLogger.Error("Failed to read AuthBridge response", "error", err.Error())
+			backendLogger.Error("Failed to read AI Agent response",
+				"error", err.Error(),
+				"error_type", fmt.Sprintf("%T", err),
+				"status_code", resp.StatusCode)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{"error": "Failed to read response from AuthBridge"})
+			json.NewEncoder(w).Encode(map[string]string{"error": "Failed to read response from AI Agent"})
+			return
+		}
+
+		backendLogger.Info("Successfully read response body",
+			"body_length", len(body),
+			"status_code", resp.StatusCode)
+
+		// Check if this is a 401 (OAuth required) response from sidecar
+		backendLogger.Info("Checking response status",
+			"status_code", resp.StatusCode,
+			"is_401", resp.StatusCode == http.StatusUnauthorized,
+			"StatusUnauthorized_const", http.StatusUnauthorized)
+
+		if resp.StatusCode == http.StatusUnauthorized {
+			backendLogger.Info("OAuth required, forwarding to browser",
+				"user_id", taskReq.UserID,
+				"response_body", string(body))
+
+			// Forward the OAuth response directly to browser
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write(body)
 			return
 		}
 
 		var taskResp aiagent.TaskResponse
 		if err := json.Unmarshal(body, &taskResp); err != nil {
-			backendLogger.Error("Failed to parse AuthBridge response", "error", err.Error())
+			backendLogger.Error("Failed to parse AI Agent response", "error", err.Error())
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{"error": "Failed to parse response from AuthBridge"})
+			json.NewEncoder(w).Encode(map[string]string{"error": "Failed to parse response from AI Agent"})
 			return
 		}
 
-		backendLogger.Info("Received result from AuthBridge",
+		backendLogger.Info("Received result from AI Agent",
 			"user_id", taskReq.UserID,
 			"status", taskResp.Status)
-
-		// Check if result indicates auth is needed
-		if taskResp.Status == "auth_required" {
-			backendLogger.Info("Auth required, sending redirect to browser",
-				"user_id", taskReq.UserID)
-
-			// Return 401 with auth URL
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusUnauthorized)
-			json.NewEncoder(w).Encode(taskResp)
-			return
-		}
 
 		// Return task result to browser
 		backendLogger.Info("Returning result to browser",

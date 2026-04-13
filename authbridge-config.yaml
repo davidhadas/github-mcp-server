@@ -1,6 +1,0 @@
-# AuthBridge Configuration
-port: 8185
-redirect_uri: "http://localhost:8187/callback"
-ai_agent_url: "http://localhost:8186"
-
-# Made with Bob

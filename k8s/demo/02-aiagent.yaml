@@ -1,0 +1,135 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aiagent
+  namespace: kagenti-demo
+  labels:
+    app: aiagent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: aiagent
+  template:
+    metadata:
+      labels:
+        app: aiagent
+    spec:
+      # Init container to set up iptables for traffic interception
+      initContainers:
+      - name: init-iptables
+        image: alpine:latest
+        securityContext:
+          capabilities:
+            add:
+            - NET_ADMIN
+          privileged: true
+        command:
+        - sh
+        - -c
+        - |
+          # Install iptables
+          apk add --no-cache iptables
+          
+          echo "Setting up iptables rules for sidecar traffic interception..."
+          
+          # Exclude sidecar's own traffic (UID 1337) to prevent loops - MUST BE FIRST
+          iptables -t nat -A OUTPUT -m owner --uid-owner 1337 -j RETURN
+          
+          # Exclude localhost-to-localhost traffic (health probes, internal communication)
+          iptables -t nat -A OUTPUT -d 127.0.0.1/32 -j RETURN
+          iptables -t nat -A OUTPUT -s 127.0.0.1/32 -j RETURN
+          
+          # Redirect all other outbound traffic to sidecar proxy (port 15001)
+          iptables -t nat -A OUTPUT -p tcp -j REDIRECT --to-port 15001
+          
+          # Redirect all inbound traffic from outside to sidecar proxy (port 15001)
+          iptables -t nat -A PREROUTING -p tcp -j REDIRECT --to-port 15001
+          
+          echo "iptables rules configured successfully"
+          iptables -t nat -L -n -v
+      
+      containers:
+      # Main container: AI Agent
+      - name: aiagent
+        image: localhost/kagenti/aiagent:demo
+        imagePullPolicy: Never  # Use local image from Kind
+        ports:
+        - name: http
+          containerPort: 8186
+          protocol: TCP
+        env:
+        - name: MCP_SERVER_URL
+          value: "http://mcp-server-service:8184"
+        - name: LOG_LEVEL
+          value: "info"
+        volumeMounts:
+        - name: config
+          mountPath: /config
+          readOnly: true
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+      
+      # Sidecar container: AuthBridge Proxy (NO HTTP ENDPOINTS)
+      - name: authbridge-sidecar
+        image: localhost/kagenti/authbridge-sidecar:demo
+        imagePullPolicy: Never  # Use local image from Kind
+        ports:
+        - name: proxy
+          containerPort: 15001
+          protocol: TCP
+        env:
+        - name: DEFAULT_MCP_SERVER_URL
+          value: "http://mcp-server-service:8184"
+        - name: LOG_LEVEL
+          value: "info"
+        - name: AUTHBRIDGE_LOG_PATH
+          value: "/tmp/authbridge.log"
+        securityContext:
+          runAsUser: 1337  # Special UID for iptables exclusion
+          runAsGroup: 1337
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false  # Allow writing to /tmp volume
+        volumeMounts:
+        - name: logs
+          mountPath: /tmp
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+      
+      volumes:
+      - name: logs
+        emptyDir: {}
+      - name: config
+        configMap:
+          name: aiagent-config
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aiagent-service
+  namespace: kagenti-demo
+  labels:
+    app: aiagent
+spec:
+  type: NodePort
+  ports:
+  - name: http
+    port: 8186
+    targetPort: 8186
+    nodePort: 30186
+    protocol: TCP
+  selector:
+    app: aiagent
+
+# Made with Bob
