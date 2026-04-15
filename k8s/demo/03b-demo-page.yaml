@@ -365,8 +365,7 @@ data:
                                 
                                 sessionStorage.setItem('pending_auth', JSON.stringify({
                                     code_verifier: errorData.code_verifier,
-                                    mcp_server_url: errorData.mcp_server_url,
-                                    login_url: errorData.auth_url
+                                    resume_key: errorData.resume_key
                                 }));
                                 
                                 sessionStorage.setItem('pending_task', JSON.stringify({
@@ -395,7 +394,7 @@ data:
                         
                         sessionStorage.setItem('pending_auth', JSON.stringify({
                             code_verifier: data.code_verifier,
-                            mcp_server_url: data.mcp_server_url
+                            resume_key: data.resume_key
                         }));
                         sessionStorage.setItem('pending_task', JSON.stringify({
                             user_id: userId,
@@ -442,7 +441,8 @@ data:
                         user_id: pendingTask.user_id,
                         task: pendingTask.task,
                         has_code: !!code,
-                        has_verifier: !!authData.code_verifier
+                        has_verifier: !!authData.code_verifier,
+                        resume_key: authData.resume_key
                     });
                     
                     const response = await fetch(CONFIG.backendUrl + '/task', {
@@ -453,7 +453,7 @@ data:
                             task: pendingTask.task,
                             oauth_code: code,
                             code_verifier: authData.code_verifier,
-                            mcp_server_url: authData.mcp_server_url
+                            resume_key: authData.resume_key
                         })
                     });
                     

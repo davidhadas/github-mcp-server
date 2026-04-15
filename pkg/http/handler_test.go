@@ -192,37 +192,37 @@ func TestHTTPHandlerRoutes(t *testing.T) {
 	}{
 		{
 			name:          "root path returns all tools",
-			path:          "/",
+			path:          "/mcp",
 			expectedTools: []string{"get_file_contents", "create_repository", "list_issues", "create_issue", "list_pull_requests", "create_pull_request", "hidden_by_holdback"},
 		},
 		{
 			name:          "readonly path filters write tools",
-			path:          "/readonly",
+			path:          "/mcp/readonly",
 			expectedTools: []string{"get_file_contents", "list_issues", "list_pull_requests", "hidden_by_holdback"},
 		},
 		{
 			name:          "toolset path filters to toolset",
-			path:          "/x/repos",
+			path:          "/mcp/x/repos",
 			expectedTools: []string{"get_file_contents", "create_repository", "hidden_by_holdback"},
 		},
 		{
 			name:          "toolset path with issues",
-			path:          "/x/issues",
+			path:          "/mcp/x/issues",
 			expectedTools: []string{"list_issues", "create_issue"},
 		},
 		{
 			name:          "toolset readonly path filters to readonly tools in toolset",
-			path:          "/x/repos/readonly",
+			path:          "/mcp/x/repos/readonly",
 			expectedTools: []string{"get_file_contents", "hidden_by_holdback"},
 		},
 		{
 			name:          "toolset readonly path with issues",
-			path:          "/x/issues/readonly",
+			path:          "/mcp/x/issues/readonly",
 			expectedTools: []string{"list_issues"},
 		},
 		{
 			name: "X-MCP-Tools header filters to specific tools",
-			path: "/",
+			path: "/mcp",
 			headers: map[string]string{
 				headers.MCPToolsHeader: "list_issues",
 			},
@@ -230,7 +230,7 @@ func TestHTTPHandlerRoutes(t *testing.T) {
 		},
 		{
 			name: "X-MCP-Tools header with multiple tools",
-			path: "/",
+			path: "/mcp",
 			headers: map[string]string{
 				headers.MCPToolsHeader: "list_issues,get_file_contents",
 			},
@@ -238,7 +238,7 @@ func TestHTTPHandlerRoutes(t *testing.T) {
 		},
 		{
 			name: "X-MCP-Tools header does not expose extra tools",
-			path: "/",
+			path: "/mcp",
 			headers: map[string]string{
 				headers.MCPToolsHeader: "list_issues",
 			},
@@ -246,7 +246,7 @@ func TestHTTPHandlerRoutes(t *testing.T) {
 		},
 		{
 			name: "X-MCP-Readonly header filters write tools",
-			path: "/",
+			path: "/mcp",
 			headers: map[string]string{
 				headers.MCPReadOnlyHeader: "true",
 			},
@@ -254,7 +254,7 @@ func TestHTTPHandlerRoutes(t *testing.T) {
 		},
 		{
 			name: "X-MCP-Toolsets header filters to toolset",
-			path: "/",
+			path: "/mcp",
 			headers: map[string]string{
 				headers.MCPToolsetsHeader: "repos",
 			},
@@ -262,7 +262,7 @@ func TestHTTPHandlerRoutes(t *testing.T) {
 		},
 		{
 			name: "URL toolset takes precedence over header toolset",
-			path: "/x/issues",
+			path: "/mcp/x/issues",
 			headers: map[string]string{
 				headers.MCPToolsetsHeader: "repos",
 			},
@@ -270,7 +270,7 @@ func TestHTTPHandlerRoutes(t *testing.T) {
 		},
 		{
 			name: "URL readonly takes precedence over header",
-			path: "/readonly",
+			path: "/mcp/readonly",
 			headers: map[string]string{
 				headers.MCPReadOnlyHeader: "false",
 			},
@@ -278,7 +278,7 @@ func TestHTTPHandlerRoutes(t *testing.T) {
 		},
 		{
 			name: "X-MCP-Features header enables flagged tool",
-			path: "/",
+			path: "/mcp",
 			headers: map[string]string{
 				headers.MCPFeaturesHeader: "mcp_holdback_consolidated_projects",
 			},
@@ -286,7 +286,7 @@ func TestHTTPHandlerRoutes(t *testing.T) {
 		},
 		{
 			name: "X-MCP-Features header with unknown flag is ignored",
-			path: "/",
+			path: "/mcp",
 			headers: map[string]string{
 				headers.MCPFeaturesHeader: "unknown_flag",
 			},
@@ -294,7 +294,7 @@ func TestHTTPHandlerRoutes(t *testing.T) {
 		},
 		{
 			name: "X-MCP-Exclude-Tools header removes specific tools",
-			path: "/",
+			path: "/mcp",
 			headers: map[string]string{
 				headers.MCPExcludeToolsHeader: "create_issue,create_pull_request",
 			},
@@ -302,7 +302,7 @@ func TestHTTPHandlerRoutes(t *testing.T) {
 		},
 		{
 			name: "X-MCP-Exclude-Tools with toolset header",
-			path: "/",
+			path: "/mcp",
 			headers: map[string]string{
 				headers.MCPToolsetsHeader:     "issues",
 				headers.MCPExcludeToolsHeader: "create_issue",
@@ -311,7 +311,7 @@ func TestHTTPHandlerRoutes(t *testing.T) {
 		},
 		{
 			name: "X-MCP-Exclude-Tools overrides X-MCP-Tools",
-			path: "/",
+			path: "/mcp",
 			headers: map[string]string{
 				headers.MCPToolsHeader:        "list_issues,create_issue",
 				headers.MCPExcludeToolsHeader: "create_issue",
@@ -320,7 +320,7 @@ func TestHTTPHandlerRoutes(t *testing.T) {
 		},
 		{
 			name: "X-MCP-Exclude-Tools with readonly path",
-			path: "/readonly",
+			path: "/mcp/readonly",
 			headers: map[string]string{
 				headers.MCPExcludeToolsHeader: "list_issues",
 			},

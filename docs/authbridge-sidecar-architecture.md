@@ -95,36 +95,50 @@ This document outlines the plan to refactor the Kagenti architecture to deploy t
 
 **Inbound (Backend → AI Agent):**
 ```
-Backend Request → Pod IP:8186 
+Backend request arrives at Pod IP:8186
     ↓
-AuthBridge intercepts (iptables)
+AuthBridge intercepts inbound traffic
     ↓
-Checks for OAuth code in request
+For any request with X-User-ID, create a request-scoped resume_key and OAuth session
     ↓
-If OAuth code present: Exchange token, cache it
+Always detach immediately and return 202 {"status":"pending","resume_key":...}
     ↓
-Forward to AI Agent (127.0.0.1:8186)
+The original backend connection is no longer used to deliver the final result
     ↓
-AI Agent processes task
+Background upstream request to AI Agent continues inside sidecar
     ↓
-Response flows back through AuthBridge
+If OAuth is needed, the waiting state stays associated with the same resume_key
+    ↓
+Backend may open a second TCP connection while the first TCP connection is still open or already closed
+    ↓
+Second connection sends X-Authbridge-Resume: <resume_key>
+    ↓
+Sidecar matches purely by resume_key, never by original socket identity
+    ↓
+Final AI Agent response is streamed on the resume connection
 ```
 
 **Outbound (AI Agent → MCP Server):**
 ```
 AI Agent makes HTTP request to MCP Server
     ↓
-AuthBridge intercepts (iptables)
+AuthBridge intercepts outbound traffic
     ↓
 Check token cache for (user_id, mcp_server)
     ↓
-If no token: Trigger OAuth discovery
+If token exists: add Authorization header and forward
     ↓
-If token exists: Add Authorization header
+If no token: discover OAuth requirements and wait for completion on the same resume_key
     ↓
-Forward to MCP Server
+Detached request state remains live independently of the first backend TCP connection
     ↓
-Response flows back to AI Agent
+Resume request on a later or concurrent second connection supplies OAuth completion data
+    ↓
+Token exchange occurs and token is cached
+    ↓
+Original detached AI Agent flow continues
+    ↓
+Response is returned through the resume request that consumes the pending exchange
 ```
 
 #### 2. **Network Configuration**
@@ -179,7 +193,9 @@ iptables -t nat -A OUTPUT -m owner --uid-owner 1337 -j RETURN
 **Key Design Principles:**
 - **NO HTTP endpoints** - Pure TCP proxy
 - Intercepts all inbound and outbound traffic via iptables
-- Extracts OAuth code from query parameters in inbound requests
+- Uses a request-scoped [`resume_key`](cmd/authbridge-sidecar/main.go:289) as the only correlation handle
+- Allows resume to arrive on a different backend TCP connection than the initial request
+- Keeps detached request state in memory until final resume, timeout, or terminal failure
 - Adds Authorization headers to outbound MCP requests
 - Completely transparent to AI Agent
 

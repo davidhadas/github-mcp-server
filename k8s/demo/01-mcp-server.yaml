@@ -39,7 +39,7 @@ spec:
         - "--port=8082"
         - "--oauth-client-id=$(GITHUB_OAUTH_CLIENT_ID)"
         - "--oauth-client-secret=$(GITHUB_OAUTH_CLIENT_SECRET)"
-        - "--oauth-redirect-uri=http://localhost:8187/oauth/callback"
+        - "--oauth-redirect-uri=http://localhost:8187/callback"
         - "--oauth-scopes=repo,read:org,read:user,user:email"
         resources:
           requests:

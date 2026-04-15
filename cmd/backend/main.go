@@ -200,7 +200,7 @@ func handleTask(config *Config) http.HandlerFunc {
 			// OAuth fields for sidecar to detect and handle
 			OAuthCode    string `json:"oauth_code,omitempty"`
 			CodeVerifier string `json:"code_verifier,omitempty"`
-			MCPServerURL string `json:"mcp_server_url,omitempty"`
+			ResumeKey    string `json:"resume_key,omitempty"`
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&taskReq); err != nil {
@@ -224,11 +224,11 @@ func handleTask(config *Config) http.HandlerFunc {
 		if taskReq.OAuthCode != "" && taskReq.CodeVerifier != "" {
 			backendLogger.Info("OAuth completion request - sending to sidecar",
 				"user_id", taskReq.UserID,
-				"mcp_server", taskReq.MCPServerURL)
+				"resume_key", taskReq.ResumeKey)
 
 			// Send OAuth completion request to sidecar with headers
 			// This will resume the suspended request
-			targetURL := config.AuthBridgeURL + "/oauth-complete"
+			targetURL := config.AuthBridgeURL + "/task"
 			req, err := http.NewRequest("POST", targetURL, nil)
 			if err != nil {
 				backendLogger.Error("Failed to create OAuth completion request", "error", err.Error())
@@ -240,7 +240,7 @@ func handleTask(config *Config) http.HandlerFunc {
 			req.Header.Set("X-OAuth-Code", taskReq.OAuthCode)
 			req.Header.Set("X-Code-Verifier", taskReq.CodeVerifier)
 			req.Header.Set("X-User-ID", taskReq.UserID)
-			req.Header.Set("X-MCP-Server-URL", taskReq.MCPServerURL)
+			req.Header.Set("X-Authbridge-Resume", taskReq.ResumeKey)
 			req.Header.Set("Content-Type", "application/json")
 
 			backendLogger.Info("Sending OAuth completion request",

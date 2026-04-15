@@ -2,12 +2,14 @@ package authbridge
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -157,7 +159,7 @@ func (ab *AuthBridge) GetToken(userID, mcpServerURL string) (string, bool) {
 
 // DiscoverOAuthRequirements proactively discovers OAuth requirements by sending
 // a tools/list request without a token to trigger MCP elicitation response
-func (ab *AuthBridge) DiscoverOAuthRequirements(userID, mcpServerURL string) (string, string, error) {
+func (ab *AuthBridge) DiscoverOAuthRequirements(ctx context.Context, userID, mcpServerURL string) (string, string, error) {
 	authBridgeLogger.Info("Proactive OAuth discovery - sending tools/list without token",
 		"user_id", userID,
 		"mcp_server", mcpServerURL)
@@ -171,7 +173,7 @@ func (ab *AuthBridge) DiscoverOAuthRequirements(userID, mcpServerURL string) (st
 	}
 
 	// Use HandleMCPRequest which will detect no token and return AuthRequiredError
-	_, err := ab.HandleMCPRequest(mcpReq)
+	_, err := ab.HandleMCPRequest(ctx, mcpReq)
 	if err != nil {
 		// Check if this is an AuthRequiredError (expected)
 		if authErr, ok := err.(*AuthRequiredError); ok {
@@ -193,96 +195,124 @@ func (ab *AuthBridge) DiscoverOAuthRequirements(userID, mcpServerURL string) (st
 
 // HandleMCPRequest processes MCP requests from AIAgent
 // This implements the aiagent.AuthBridge interface
-func (ab *AuthBridge) HandleMCPRequest(req aiagent.MCPRequest) (*aiagent.MCPResponse, error) {
+func (ab *AuthBridge) HandleMCPRequest(ctx context.Context, req aiagent.MCPRequest) (*aiagent.MCPResponse, error) {
 	// Check token cache
 	token, hasToken := ab.tokenCache.GetToken(req.UserID, req.MCPServerURL)
 
 	if !hasToken {
-		// No token - perform proactive OAuth discovery using /auth/url endpoint
-		authBridgeLogger.Info("No token found - initiating proactive OAuth discovery",
+		// No token - send MCP request without token to trigger OAuth elicitation
+		authBridgeLogger.Info("No token found - sending MCP request to trigger OAuth elicitation",
 			"user_id", req.UserID,
 			"mcp_server", req.MCPServerURL,
-			"original_method", req.Method)
+			"method", req.Method)
 
-		// Call /auth/url endpoint to get OAuth URL
-		authURLEndpoint := req.MCPServerURL + "/auth/url"
-		authBridgeLogger.Info("Calling /auth/url endpoint for OAuth discovery",
-			"user_id", req.UserID,
-			"mcp_server", req.MCPServerURL,
-			"endpoint", authURLEndpoint)
+		// Build MCP request URL - use the method as the endpoint path
+		// For tools/list, this would be: http://mcp-server/tools/list
+		mcpEndpoint := fmt.Sprintf("%s/%s", strings.TrimSuffix(req.MCPServerURL, "/"), req.Method)
 
-		authURLReq := map[string]string{
-			"callback_url": ab.redirectURI,
-		}
-		jsonData, err := json.Marshal(authURLReq)
-		if err != nil {
-			authBridgeLogger.Error("Failed to marshal auth URL request",
-				"error", err.Error())
-			return nil, fmt.Errorf("failed to marshal auth URL request: %v", err)
+		// Marshal params as JSON body
+		var reqBody []byte
+		var err error
+		if len(req.Params) > 0 {
+			reqBody, err = json.Marshal(req.Params)
+			if err != nil {
+				return nil, fmt.Errorf("failed to marshal MCP params: %v", err)
+			}
 		}
 
-		authBridgeLogger.Info("Sending POST request to MCP server",
-			"endpoint", authURLEndpoint,
-			"body", string(jsonData))
-
-		mcpResp, err := http.Post(
-			authURLEndpoint,
-			"application/json",
-			bytes.NewReader(jsonData),
-		)
+		// Send POST request to MCP server WITHOUT Authorization header
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, mcpEndpoint, bytes.NewReader(reqBody))
 		if err != nil {
-			authBridgeLogger.Error("Failed to POST to auth URL endpoint",
+			return nil, fmt.Errorf("failed to create MCP request: %v", err)
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+
+		authBridgeLogger.Info("Sending MCP request without token",
+			"endpoint", mcpEndpoint,
+			"method", req.Method)
+
+		mcpHTTPResp, err := http.DefaultClient.Do(httpReq)
+		if err != nil {
+			authBridgeLogger.Error("Failed to send MCP request",
 				"error", err.Error(),
-				"endpoint", authURLEndpoint)
-			return nil, fmt.Errorf("failed to get auth URL: %v", err)
+				"endpoint", mcpEndpoint)
+			return nil, fmt.Errorf("failed to send MCP request: %v", err)
 		}
-		defer mcpResp.Body.Close()
+		defer mcpHTTPResp.Body.Close()
 
-		authBridgeLogger.Info("Received response from MCP server",
-			"status_code", mcpResp.StatusCode,
-			"status", mcpResp.Status)
-
-		body, err := io.ReadAll(mcpResp.Body)
+		body, err := io.ReadAll(mcpHTTPResp.Body)
 		if err != nil {
-			authBridgeLogger.Error("Failed to read response body",
-				"error", err.Error())
-			return nil, fmt.Errorf("failed to read response body: %v", err)
+			return nil, fmt.Errorf("failed to read MCP response: %v", err)
 		}
 
-		authBridgeLogger.Info("Response body received",
-			"body", string(body),
-			"length", len(body))
+		// Check if we got a 401 with OAuth elicitation
+		if mcpHTTPResp.StatusCode == http.StatusUnauthorized {
+			authBridgeLogger.Info("Received 401 from MCP server - OAuth elicitation triggered",
+				"user_id", req.UserID,
+				"mcp_server", req.MCPServerURL,
+				"www_authenticate", mcpHTTPResp.Header.Get("WWW-Authenticate"))
 
-		if mcpResp.StatusCode != http.StatusOK {
-			authBridgeLogger.Error("Non-OK status from auth URL endpoint",
-				"status_code", mcpResp.StatusCode,
-				"body", string(body))
-			return nil, fmt.Errorf("auth URL endpoint returned status %d: %s", mcpResp.StatusCode, string(body))
+			// Call /auth/url endpoint to get OAuth URL and code verifier
+			authURLEndpoint := req.MCPServerURL + "/auth/url"
+			authURLReq := map[string]string{
+				"callback_url": ab.redirectURI,
+			}
+			jsonData, err := json.Marshal(authURLReq)
+			if err != nil {
+				return nil, fmt.Errorf("failed to marshal auth URL request: %v", err)
+			}
+
+			authHTTPReq, err := http.NewRequestWithContext(ctx, http.MethodPost, authURLEndpoint, bytes.NewReader(jsonData))
+			if err != nil {
+				return nil, fmt.Errorf("failed to create auth URL request: %v", err)
+			}
+			authHTTPReq.Header.Set("Content-Type", "application/json")
+
+			authResp, err := http.DefaultClient.Do(authHTTPReq)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get auth URL: %v", err)
+			}
+			defer authResp.Body.Close()
+
+			authBody, err := io.ReadAll(authResp.Body)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read auth response: %v", err)
+			}
+
+			if authResp.StatusCode != http.StatusOK {
+				return nil, fmt.Errorf("auth URL endpoint returned status %d: %s", authResp.StatusCode, string(authBody))
+			}
+
+			var authURLResp struct {
+				URL          string `json:"url"`
+				CodeVerifier string `json:"code_verifier"`
+			}
+			if err := json.Unmarshal(authBody, &authURLResp); err != nil {
+				return nil, fmt.Errorf("failed to unmarshal auth response: %v", err)
+			}
+
+			authBridgeLogger.Info("OAuth discovery successful via MCP elicitation",
+				"user_id", req.UserID,
+				"auth_url", authURLResp.URL,
+				"code_verifier_len", len(authURLResp.CodeVerifier))
+
+			// Return special error that ExecuteTask will catch
+			return nil, &AuthRequiredError{
+				AuthURL:      authURLResp.URL,
+				CodeVerifier: authURLResp.CodeVerifier,
+				UserID:       req.UserID,
+				MCPServerURL: req.MCPServerURL,
+			}
 		}
 
-		var authResp struct {
-			URL          string `json:"url"`
-			CodeVerifier string `json:"code_verifier"`
-		}
-		if err := json.Unmarshal(body, &authResp); err != nil {
-			authBridgeLogger.Error("Failed to unmarshal auth response",
-				"error", err.Error(),
-				"body", string(body))
-			return nil, fmt.Errorf("failed to unmarshal auth response: %v", err)
-		}
-
-		authBridgeLogger.Info("OAuth discovery successful via /auth/url endpoint",
-			"user_id", req.UserID,
-			"auth_url", authResp.URL,
-			"code_verifier_len", len(authResp.CodeVerifier))
-
-		// Return special error that ExecuteTask will catch
-		return nil, &AuthRequiredError{
-			AuthURL:      authResp.URL,
-			CodeVerifier: authResp.CodeVerifier,
-			UserID:       req.UserID,
-			MCPServerURL: req.MCPServerURL,
-		}
+		// Got a response without 401 - unexpected when no token, but return it anyway
+		authBridgeLogger.Warn("Unexpected non-401 response during OAuth discovery",
+			"status", mcpHTTPResp.StatusCode,
+			"user_id", req.UserID)
+		return &aiagent.MCPResponse{
+			Status: mcpHTTPResp.StatusCode,
+			Body:   body,
+		}, nil
 	}
 
 	// Token exists - make MCP request
@@ -341,7 +371,7 @@ func (ab *AuthBridge) HandleMCPRequest(req aiagent.MCPRequest) (*aiagent.MCPResp
 	}
 
 	// Call GitHub API
-	httpReq, _ := http.NewRequest(apiMethod, apiURL, nil)
+	httpReq, _ := http.NewRequestWithContext(ctx, apiMethod, apiURL, nil)
 	httpReq.Header.Set("Authorization", "Bearer "+token)
 	httpReq.Header.Set("Accept", "application/vnd.github.v3+json")
 	httpReq.Header.Set("User-Agent", "AuthBridge")
@@ -367,7 +397,7 @@ func (ab *AuthBridge) HandleMCPRequest(req aiagent.MCPRequest) (*aiagent.MCPResp
 
 		// Recursively call HandleMCPRequest which will trigger OAuth discovery
 		// since token is now deleted from cache
-		return ab.HandleMCPRequest(req)
+		return ab.HandleMCPRequest(ctx, req)
 	}
 
 	return &aiagent.MCPResponse{
@@ -388,7 +418,7 @@ func (ab *AuthBridge) HandleMCPProxyHTTP(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Use existing HandleMCPRequest logic
-	mcpResp, err := ab.HandleMCPRequest(mcpReq)
+	mcpResp, err := ab.HandleMCPRequest(r.Context(), mcpReq)
 	if err != nil {
 		// Check if this is an AuthRequiredError
 		if authErr, ok := err.(*AuthRequiredError); ok {
@@ -420,7 +450,7 @@ func (ab *AuthBridge) HandleMCPProxyHTTP(w http.ResponseWriter, r *http.Request)
 				authBridgeLogger.Info("OAuth completed - retrying MCP request",
 					"user_id", mcpReq.UserID)
 
-				mcpResp, err = ab.HandleMCPRequest(mcpReq)
+				mcpResp, err = ab.HandleMCPRequest(r.Context(), mcpReq)
 				if err != nil {
 					authBridgeLogger.Error("MCP request failed after OAuth", "error", err.Error())
 					http.Error(w, fmt.Sprintf("MCP request failed: %v", err), http.StatusInternalServerError)
@@ -617,7 +647,7 @@ func (ab *AuthBridge) ExecuteTaskViaHTTP(taskReq aiagent.TaskRequest, aiAgentURL
 
 // ExchangeToken exchanges an OAuth code for a token via the MCP server
 // and caches it internally. Returns only success/failure, not the token.
-func (ab *AuthBridge) ExchangeToken(userID, mcpServerURL, code, codeVerifier string) error {
+func (ab *AuthBridge) ExchangeToken(ctx context.Context, userID, mcpServerURL, code, codeVerifier string) error {
 	authBridgeLogger.Info("Forwarding token exchange to MCP server",
 		"user_id", userID,
 		"mcp_server", mcpServerURL)
@@ -629,11 +659,13 @@ func (ab *AuthBridge) ExchangeToken(userID, mcpServerURL, code, codeVerifier str
 	}
 	jsonData, _ := json.Marshal(tokenReq)
 
-	mcpResp, err := http.Post(
-		mcpServerURL+"/oauth/exchange-token",
-		"application/json",
-		bytes.NewReader(jsonData),
-	)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, mcpServerURL+"/oauth/exchange-token", bytes.NewReader(jsonData))
+	if err != nil {
+		return fmt.Errorf("failed to create token exchange request: %v", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	mcpResp, err := http.DefaultClient.Do(httpReq)
 	if err != nil {
 		authBridgeLogger.Error("Token exchange failed",
 			"error", err.Error(),
