@@ -179,7 +179,7 @@ func (agent *AIAgent) taskToMCPRequest(task TaskRequest) MCPRequest {
 			if toolArguments == nil {
 				toolArguments = map[string]interface{}{}
 			}
-			toolArguments["query"] = "user:@me"
+			toolArguments["query"] = "mcp"
 			agentLogger.Info("Repository task detected - using search_repositories with query 'user:@me'")
 		} else if strings.Contains(taskLower, "list") && (strings.Contains(taskLower, "tool") || strings.Contains(taskLower, "available")) {
 			// List tools
@@ -447,7 +447,7 @@ func (agent *AIAgent) formatResponseByTaskType(rawResult interface{}, task strin
 			switch toolName {
 			case "get_me":
 				return agent.formatUserProfile(rawResult)
-			case "list_repos":
+			case "search_repositories":
 				return agent.formatRepositoriesList(rawResult)
 			}
 		}
@@ -550,11 +550,40 @@ func (agent *AIAgent) formatRepositoriesList(rawResult interface{}) interface{} 
 	// Extract data from MCP content structure if present
 	actualData := extractMCPContent(rawResult)
 
-	// Check if result is an array of repositories
+	// Check if this is a search_repositories result with items array
+	if resultMap, ok := actualData.(map[string]interface{}); ok {
+		if items, hasItems := resultMap["items"].([]interface{}); hasItems {
+			// Format each repository with key fields only
+			formattedRepos := make([]map[string]interface{}, 0, len(items))
+			for _, item := range items {
+				if repo, ok := item.(map[string]interface{}); ok {
+					formatted := map[string]interface{}{
+						"name":        repo["name"],
+						"full_name":   repo["full_name"],
+						"description": repo["description"],
+						"html_url":    repo["html_url"],
+						"language":    repo["language"],
+						"stars":       repo["stargazers_count"],
+						"forks":       repo["forks_count"],
+						"private":     repo["private"],
+					}
+					formattedRepos = append(formattedRepos, formatted)
+				}
+			}
+
+			return map[string]interface{}{
+				"total_count":  resultMap["total_count"],
+				"repositories": formattedRepos,
+				"count":        len(formattedRepos),
+			}
+		}
+	}
+
+	// Check if result is an array of repositories (fallback)
 	if resultArray, ok := actualData.([]interface{}); ok {
 		formatted := map[string]interface{}{
-			"repositories":       resultArray,
-			"total_repositories": len(resultArray),
+			"repositories": resultArray,
+			"count":        len(resultArray),
 		}
 		return formatted
 	}
