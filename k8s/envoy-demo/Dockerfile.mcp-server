@@ -1,0 +1,27 @@
+# Dockerfile for GitHub MCP Server
+# Lightweight build without UI
+
+FROM golang:1.25-alpine AS build
+ARG VERSION="dev"
+ARG BUILD_TIME="unknown"
+
+WORKDIR /build
+RUN apk add --no-cache git
+COPY . .
+
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build \
+    -ldflags="-s -w -X main.version=${VERSION} -X main.commit=$(git rev-parse HEAD 2>/dev/null || echo 'unknown') -X main.date=${BUILD_TIME}" \
+    -o /bin/github-mcp-server ./cmd/github-mcp-server
+
+FROM gcr.io/distroless/base-debian12
+LABEL io.modelcontextprotocol.server.name="io.github.github/github-mcp-server"
+LABEL org.opencontainers.image.source="https://github.com/github/github-mcp-server"
+LABEL org.opencontainers.image.description="GitHub MCP Server"
+
+WORKDIR /app
+COPY --from=build /bin/github-mcp-server /github-mcp-server
+EXPOSE 8082
+ENTRYPOINT ["/github-mcp-server"]
+CMD ["stdio"]

@@ -1,0 +1,61 @@
+# Multi-stage Dockerfile for Kagenti Envoy Demo Components
+# Builds: github-mcp-server, token-broker, backend-envoy, aiagent
+# All components in one image for simplified deployment
+# Note: Skips UI build - use main Dockerfile if UI is needed
+
+FROM golang:1.24-alpine@sha256:8e02eb337d9e0ea459e041f1ee5eece41cbb61f1d83e7d883a3e2fb4862063fa AS build
+ARG VERSION="dev"
+ARG BUILD_TIME="unknown"
+
+# Set the working directory
+WORKDIR /build
+
+# Install git
+RUN --mount=type=cache,target=/var/cache/apk \
+    apk add git
+
+# Copy source code
+COPY . .
+
+# Build all binaries (skip MCP server with UI, build others)
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=${VERSION} -X main.commit=$(git rev-parse HEAD 2>/dev/null || echo 'unknown') -X main.date=${BUILD_TIME}" \
+    -o /bin/token-broker ./cmd/token-broker && \
+    CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=${VERSION} -X main.date=${BUILD_TIME}" \
+    -o /bin/backend-envoy ./cmd/backend-envoy && \
+    CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=${VERSION} -X main.date=${BUILD_TIME}" \
+    -o /bin/aiagent ./cmd/aiagent
+
+# Build MCP server without UI (stdio mode only)
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -tags=no_ui -ldflags="-s -w -X main.version=${VERSION} -X main.commit=$(git rev-parse HEAD 2>/dev/null || echo 'unknown') -X main.date=${BUILD_TIME}" \
+    -o /bin/github-mcp-server ./cmd/github-mcp-server || \
+    CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=${VERSION} -X main.commit=$(git rev-parse HEAD 2>/dev/null || echo 'unknown') -X main.date=${BUILD_TIME}" \
+    -o /bin/github-mcp-server ./cmd/github-mcp-server
+
+# Final stage - all binaries in one image
+FROM gcr.io/distroless/base-debian12@sha256:937c7eaaf6f3f2d38a1f8c4aeff326f0c56e4593ea152e9e8f74d976dde52f56
+
+# Add MCP server annotation
+LABEL io.modelcontextprotocol.server.name="io.github.github/github-mcp-server"
+LABEL org.opencontainers.image.source="https://github.com/github/github-mcp-server"
+LABEL org.opencontainers.image.description="Kagenti Envoy Demo - MCP Server, Token Broker, Backend, AI Agent"
+LABEL org.opencontainers.image.licenses="MIT"
+
+# Set the working directory
+WORKDIR /app
+
+# Copy all binaries from the build stage
+COPY --from=build /bin/github-mcp-server /github-mcp-server
+COPY --from=build /bin/token-broker /token-broker
+COPY --from=build /bin/backend-envoy /backend-envoy
+COPY --from=build /bin/aiagent /aiagent
+
+# Expose all ports used by the demo components
+EXPOSE 8082 8186 8187 8190
+
+# Default to MCP server (can be overridden in k8s manifests)
+ENTRYPOINT ["/github-mcp-server"]
+CMD ["stdio"]

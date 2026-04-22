@@ -1,0 +1,24 @@
+# Dockerfile for AI Agent
+
+FROM golang:1.24-alpine AS build
+ARG VERSION="dev"
+ARG BUILD_TIME="unknown"
+
+WORKDIR /build
+RUN apk add --no-cache git
+COPY . .
+
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build \
+    -ldflags="-s -w -X main.version=${VERSION} -X main.date=${BUILD_TIME}" \
+    -o /bin/aiagent ./cmd/aiagent
+
+FROM gcr.io/distroless/base-debian12
+LABEL org.opencontainers.image.source="https://github.com/github/github-mcp-server"
+LABEL org.opencontainers.image.description="Kagenti AI Agent"
+
+WORKDIR /app
+COPY --from=build /bin/aiagent /aiagent
+EXPOSE 8186
+ENTRYPOINT ["/aiagent"]

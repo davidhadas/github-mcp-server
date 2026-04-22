@@ -1,0 +1,24 @@
+# Dockerfile for Token Broker Service
+
+FROM golang:1.24-alpine AS build
+ARG VERSION="dev"
+ARG BUILD_TIME="unknown"
+
+WORKDIR /build
+RUN apk add --no-cache git
+COPY . .
+
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build \
+    -ldflags="-s -w -X main.version=${VERSION} -X main.date=${BUILD_TIME}" \
+    -o /bin/token-broker ./cmd/token-broker
+
+FROM gcr.io/distroless/base-debian12
+LABEL org.opencontainers.image.source="https://github.com/github/github-mcp-server"
+LABEL org.opencontainers.image.description="Kagenti Token Broker - OAuth session and token management"
+
+WORKDIR /app
+COPY --from=build /bin/token-broker /token-broker
+EXPOSE 8190
+ENTRYPOINT ["/token-broker"]
