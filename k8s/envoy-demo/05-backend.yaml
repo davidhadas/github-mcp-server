@@ -1,0 +1,322 @@
+# Backend Deployment and Service
+# This is the Envoy-based backend implementation with Token Broker integration.
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-service
+  namespace: kagenti-envoy-demo
+  labels:
+    app: backend
+spec:
+  type: NodePort
+  ports:
+    - port: 8187
+      targetPort: 8187
+      nodePort: 30187
+      protocol: TCP
+      name: http
+  selector:
+    app: backend
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: kagenti-envoy-demo
+  labels:
+    app: backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      containers:
+        - name: backend
+          image: localhost/kagenti/mcp-server:demo
+          imagePullPolicy: Never  # Use local image from Kind
+          command: ["/backend-envoy"]
+          ports:
+            - containerPort: 8187
+              name: http
+              protocol: TCP
+          env:
+            - name: BACKEND_PORT
+              value: "8187"
+            - name: TOKEN_BROKER_URL
+              value: "http://token-broker-service:8190"
+            - name: AIAGENT_URL
+              value: "http://aiagent-service:8186"
+            - name: DEMO_PAGE_PATH
+              value: "/app/demo.html"
+          volumeMounts:
+            - name: demo-page
+              mountPath: /app/demo.html
+              subPath: demo.html
+              readOnly: true
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+      
+      volumes:
+        - name: demo-page
+          configMap:
+            name: backend-demo-page
+
+---
+# ConfigMap for demo page
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-demo-page
+  namespace: kagenti-envoy-demo
+  labels:
+    app: backend
+data:
+  demo.html: |
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Envoy Demo - GitHub MCP Server</title>
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                min-height: 100vh; display: flex; justify-content: center; align-items: center; padding: 20px;
+            }
+            .container {
+                background: white; border-radius: 12px; box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+                max-width: 900px; width: 100%; padding: 40px;
+            }
+            h1 { color: #333; margin-bottom: 10px; font-size: 28px; }
+            .subtitle { color: #666; margin-bottom: 20px; font-size: 14px; }
+            .architecture {
+                background: #f0f7ff; border: 2px solid #4a90e2; border-radius: 8px;
+                padding: 15px; margin-bottom: 20px; font-family: monospace; font-size: 12px;
+            }
+            .status { padding: 15px; border-radius: 8px; margin-bottom: 20px; font-weight: 500; }
+            .status.info { background: #e3f2fd; color: #1976d2; border-left: 4px solid #1976d2; }
+            .status.success { background: #e8f5e9; color: #388e3c; border-left: 4px solid #388e3c; }
+            .status.error { background: #ffebee; color: #c62828; border-left: 4px solid #c62828; }
+            button {
+                background: #667eea; color: white; border: none; padding: 12px 24px;
+                border-radius: 6px; font-size: 16px; font-weight: 600; cursor: pointer;
+                transition: all 0.3s; margin-right: 10px; margin-bottom: 10px;
+            }
+            button:hover { background: #5568d3; transform: translateY(-2px); box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4); }
+            button:disabled { background: #ccc; cursor: not-allowed; transform: none; }
+            .section { margin-bottom: 30px; padding: 20px; background: #f8f9fa; border-radius: 8px; }
+            .section h2 { color: #333; font-size: 18px; margin-bottom: 15px; }
+            pre {
+                background: #2d2d2d; color: #f8f8f2; padding: 15px; border-radius: 6px;
+                overflow-x: auto; font-size: 13px; line-height: 1.5; max-height: 400px;
+            }
+            .input-group { margin-bottom: 15px; }
+            .input-group label { display: block; margin-bottom: 5px; font-weight: 600; color: #333; }
+            .input-group input {
+                width: 100%; padding: 10px; border: 2px solid #ddd;
+                border-radius: 6px; font-size: 14px;
+            }
+            .input-group input:focus { outline: none; border-color: #667eea; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🚀 Envoy Demo - GitHub MCP Server</h1>
+            <p class="subtitle">Envoy-based OAuth with Token Broker</p>
+            
+            <div class="architecture">
+                <div style="font-weight: bold; margin-bottom: 10px;">Architecture:</div>
+                <div>Browser → Backend:30187 → AI Agent (with Envoy) → MCP Server:30184</div>
+                <div>Token Broker manages OAuth sessions and token caching</div>
+            </div>
+            
+            <div id="status" class="status info">
+                Ready to test! Enter a user ID and submit a task.
+            </div>
+            
+            <div class="section">
+                <h2>User Identity</h2>
+                <div class="input-group">
+                    <label for="userId">User ID:</label>
+                    <input type="text" id="userId" placeholder="e.g., demo-user" value="demo-user">
+                </div>
+            </div>
+            
+            <div class="section">
+                <h2>Submit Tasks</h2>
+                <button onclick="submitTask('Get my GitHub profile')">👤 Get Profile</button>
+                <button onclick="submitTask('List my repositories')">📚 List Repos</button>
+                <button onclick="submitTask('List available tools')">🔧 List Tools</button>
+                
+                <div id="result" style="margin-top: 20px;"></div>
+            </div>
+        </div>
+
+        <script>
+            let currentJobId = null;
+            let pollInterval = null;
+            let oauthWindow = null;
+
+            async function submitTask(task) {
+                const userId = document.getElementById('userId').value.trim();
+                if (!userId) {
+                    showStatus('error', 'Please enter a User ID');
+                    return;
+                }
+
+                const resultDiv = document.getElementById('result');
+                resultDiv.innerHTML = '<p>Submitting task...</p>';
+                showStatus('info', `Submitting task: "${task}"...`);
+
+                try {
+                    // Step 1: Submit task and get job_id
+                    const response = await fetch('/task', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ user_id: userId, task: task })
+                    });
+
+                    if (!response.ok) {
+                        const error = await response.json();
+                        showStatus('error', 'Error: ' + (error.message || error.error || 'Task submission failed'));
+                        resultDiv.innerHTML = '<pre>' + JSON.stringify(error, null, 2) + '</pre>';
+                        return;
+                    }
+
+                    const data = await response.json();
+                    currentJobId = data.job_id;
+
+                    console.log('Task submitted, job_id:', currentJobId);
+                    showStatus('info', 'Task submitted. Waiting for result...');
+                    resultDiv.innerHTML = '<p>Processing... (Job ID: ' + currentJobId + ')</p>';
+
+                    // Step 2: Start polling for job status
+                    startPolling(currentJobId);
+
+                } catch (error) {
+                    showStatus('error', 'Error: ' + error.message);
+                    resultDiv.innerHTML = '<p style="color: #c62828;">Error: ' + error.message + '</p>';
+                }
+            }
+
+            function startPolling(jobId) {
+                // Clear any existing poll interval
+                if (pollInterval) {
+                    clearInterval(pollInterval);
+                }
+
+                // Poll every 1 second
+                pollInterval = setInterval(() => pollJobStatus(jobId), 1000);
+
+                // Also poll immediately
+                pollJobStatus(jobId);
+            }
+
+            async function pollJobStatus(jobId) {
+                try {
+                    const response = await fetch('/job/' + jobId);
+                    
+                    if (!response.ok) {
+                        console.error('Failed to fetch job status:', response.status);
+                        return;
+                    }
+
+                    const status = await response.json();
+                    console.log('Job status:', status);
+
+                    const resultDiv = document.getElementById('result');
+
+                    switch (status.status) {
+                        case 'pending':
+                            showStatus('info', 'Task pending...');
+                            resultDiv.innerHTML = '<p>Task is pending...</p>';
+                            break;
+
+                        case 'processing':
+                            showStatus('info', 'Task is processing...');
+                            resultDiv.innerHTML = '<p>Task is being processed...</p>';
+                            break;
+
+                        case 'oauth_required':
+                            showStatus('info', 'GitHub authorization required. Opening login page...');
+                            resultDiv.innerHTML = '<p>Waiting for GitHub authorization...</p>';
+                            
+                            // Open OAuth popup if not already open
+                            if (status.auth_url && (!oauthWindow || oauthWindow.closed)) {
+                                oauthWindow = window.open(status.auth_url, '_blank', 'width=600,height=700');
+                            }
+                            break;
+
+                        case 'completed':
+                            // Stop polling
+                            if (pollInterval) {
+                                clearInterval(pollInterval);
+                                pollInterval = null;
+                            }
+                            
+                            showStatus('success', 'Task completed successfully!');
+                            resultDiv.innerHTML = '<pre>' + JSON.stringify(status.result, null, 2) + '</pre>';
+                            
+                            // Close OAuth window if open
+                            if (oauthWindow && !oauthWindow.closed) {
+                                oauthWindow.close();
+                            }
+                            break;
+
+                        case 'failed':
+                            // Stop polling
+                            if (pollInterval) {
+                                clearInterval(pollInterval);
+                                pollInterval = null;
+                            }
+                            
+                            showStatus('error', 'Task failed: ' + (status.error || 'Unknown error'));
+                            resultDiv.innerHTML = '<p style="color: #c62828;">Error: ' + status.error + '</p>';
+                            
+                            // Close OAuth window if open
+                            if (oauthWindow && !oauthWindow.closed) {
+                                oauthWindow.close();
+                            }
+                            break;
+                    }
+
+                } catch (error) {
+                    console.error('Error polling job status:', error);
+                }
+            }
+
+            function showStatus(type, message) {
+                const statusDiv = document.getElementById('status');
+                statusDiv.className = `status ${type}`;
+                statusDiv.innerHTML = message;
+            }
+
+            // Clean up on page unload
+            window.addEventListener('beforeunload', () => {
+                if (pollInterval) {
+                    clearInterval(pollInterval);
+                }
+                if (oauthWindow && !oauthWindow.closed) {
+                    oauthWindow.close();
+                }
+            });
+        </script>
+    </body>
+    </html>
+
+# Made with Bob

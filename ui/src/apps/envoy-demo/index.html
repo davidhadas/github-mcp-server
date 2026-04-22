@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kagenti Envoy Demo</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+        }
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 500;
+            color: #333;
+        }
+        input, textarea {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+            box-sizing: border-box;
+        }
+        textarea {
+            min-height: 100px;
+            resize: vertical;
+        }
+        button {
+            background: #0366d6;
+            color: white;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 4px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        button:hover {
+            background: #0256c7;
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .status {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 4px;
+            display: none;
+        }
+        .status.info {
+            background: #e3f2fd;
+            border: 1px solid #2196f3;
+            color: #1976d2;
+            display: block;
+        }
+        .status.success {
+            background: #e8f5e9;
+            border: 1px solid #4caf50;
+            color: #2e7d32;
+            display: block;
+        }
+        .status.error {
+            background: #ffebee;
+            border: 1px solid #f44336;
+            color: #c62828;
+            display: block;
+        }
+        .status.oauth {
+            background: #fff3e0;
+            border: 1px solid #ff9800;
+            color: #e65100;
+            display: block;
+        }
+        .result {
+            margin-top: 20px;
+            padding: 15px;
+            background: #f5f5f5;
+            border-radius: 4px;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            display: none;
+        }
+        .oauth-popup {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+            z-index: 1000;
+            display: none;
+            max-width: 500px;
+        }
+        .oauth-popup.show {
+            display: block;
+        }
+        .overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0,0,0,0.5);
+            z-index: 999;
+            display: none;
+        }
+        .overlay.show {
+            display: block;
+        }
+        .oauth-button {
+            display: block;
+            width: 100%;
+            margin-top: 15px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 Kagenti Envoy Demo</h1>
+        <p class="subtitle">Test the Envoy-based OAuth flow with Token Broker</p>
+
+        <div class="form-group">
+            <label for="userId">User ID:</label>
+            <input type="text" id="userId" value="test-user" placeholder="Enter your user ID">
+        </div>
+
+        <div class="form-group">
+            <label for="task">Task:</label>
+            <textarea id="task" placeholder="Enter your task (e.g., 'List my GitHub repositories')">List my GitHub repositories</textarea>
+        </div>
+
+        <button id="submitBtn" onclick="submitTask()">Submit Task</button>
+
+        <div id="status" class="status"></div>
+        <div id="result" class="result"></div>
+    </div>
+
+    <div id="overlay" class="overlay"></div>
+    <div id="oauthPopup" class="oauth-popup">
+        <h2>🔐 OAuth Required</h2>
+        <p>This task requires authorization to access your GitHub account.</p>
+        <p><strong>MCP Server:</strong> <span id="mcpServer"></span></p>
+        <button class="oauth-button" onclick="startOAuth()">Authorize with GitHub</button>
+        <button class="oauth-button" style="background: #666;" onclick="cancelOAuth()">Cancel</button>
+    </div>
+
+    <script>
+        let eventSource = null;
+        let currentAuthURL = null;
+        let currentUserID = null;
+
+        // Check for OAuth callback
+        const urlParams = new URLSearchParams(window.location.search);
+        if (urlParams.get('oauth_success') === 'true') {
+            showStatus('OAuth authorization successful! You can now submit your task again.', 'success');
+            // Clear URL parameters
+            window.history.replaceState({}, document.title, window.location.pathname);
+        }
+
+        function showStatus(message, type = 'info') {
+            const status = document.getElementById('status');
+            status.textContent = message;
+            status.className = 'status ' + type;
+        }
+
+        function showResult(data) {
+            const result = document.getElementById('result');
+            result.textContent = JSON.stringify(data, null, 2);
+            result.style.display = 'block';
+        }
+
+        function showOAuthPopup(mcpServer, authURL) {
+            currentAuthURL = authURL;
+            document.getElementById('mcpServer').textContent = mcpServer;
+            document.getElementById('overlay').classList.add('show');
+            document.getElementById('oauthPopup').classList.add('show');
+        }
+
+        function hideOAuthPopup() {
+            document.getElementById('overlay').classList.remove('show');
+            document.getElementById('oauthPopup').classList.remove('show');
+            currentAuthURL = null;
+        }
+
+        function startOAuth() {
+            if (currentAuthURL) {
+                // Open OAuth URL in same window
+                window.location.href = currentAuthURL;
+            }
+        }
+
+        function cancelOAuth() {
+            hideOAuthPopup();
+            showStatus('OAuth authorization cancelled', 'info');
+            stopEventSource();
+        }
+
+        function startEventSource(userID) {
+            if (eventSource) {
+                eventSource.close();
+            }
+
+            currentUserID = userID;
+            const url = `/events?user_id=${encodeURIComponent(userID)}`;
+            eventSource = new EventSource(url);
+
+            eventSource.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+                console.log('Received event:', data);
+
+                if (data.type === 'oauth_required') {
+                    showStatus('OAuth authorization required...', 'oauth');
+                    showOAuthPopup(data.mcp_server_url, data.auth_url);
+                } else if (data.type === 'error') {
+                    showStatus('Error: ' + data.message, 'error');
+                    stopEventSource();
+                }
+            };
+
+            eventSource.onerror = function(error) {
+                console.error('EventSource error:', error);
+                stopEventSource();
+            };
+        }
+
+        function stopEventSource() {
+            if (eventSource) {
+                eventSource.close();
+                eventSource = null;
+            }
+        }
+
+        async function submitTask() {
+            const userId = document.getElementById('userId').value.trim();
+            const task = document.getElementById('task').value.trim();
+
+            if (!userId || !task) {
+                showStatus('Please enter both User ID and Task', 'error');
+                return;
+            }
+
+            // Start listening for OAuth events
+            startEventSource(userId);
+
+            showStatus('Submitting task...', 'info');
+            document.getElementById('submitBtn').disabled = true;
+            document.getElementById('result').style.display = 'none';
+
+            try {
+                const response = await fetch('/task', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        user_id: userId,
+                        task: task,
+                        agent_url: 'http://aiagent-service:8186/task'
+                    })
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    showStatus('Task completed successfully!', 'success');
+                    showResult(data);
+                    stopEventSource();
+                } else {
+                    showStatus('Task failed: ' + (data.error || 'Unknown error'), 'error');
+                    showResult(data);
+                    stopEventSource();
+                }
+            } catch (error) {
+                showStatus('Network error: ' + error.message, 'error');
+                stopEventSource();
+            } finally {
+                document.getElementById('submitBtn').disabled = false;
+            }
+        }
+
+        // Handle Enter key in task textarea
+        document.getElementById('task').addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' && e.ctrlKey) {
+                submitTask();
+            }
+        });
+
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', function() {
+            stopEventSource();
+        });
+    </script>
+</body>
+</html>

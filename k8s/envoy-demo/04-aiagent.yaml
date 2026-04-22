@@ -1,0 +1,263 @@
+# AI Agent Deployment with Envoy Sidecar
+# This replaces the old authbridge-sidecar with Envoy for transparent proxying
+# and OAuth token injection via ext_authz.
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aiagent-service
+  namespace: kagenti-envoy-demo
+  labels:
+    app: aiagent
+spec:
+  type: NodePort
+  ports:
+    - port: 8186
+      targetPort: 15124  # Envoy inbound listener
+      nodePort: 30186
+      protocol: TCP
+      name: http
+  selector:
+    app: aiagent
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aiagent
+  namespace: kagenti-envoy-demo
+  labels:
+    app: aiagent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: aiagent
+  template:
+    metadata:
+      labels:
+        app: aiagent
+    spec:
+      # Init container to set up iptables for transparent proxying
+      initContainers:
+        - name: proxy-init
+          image: nicolaka/netshoot:latest
+          securityContext:
+            privileged: false
+            capabilities:
+              add:
+                - NET_ADMIN
+                - NET_RAW
+              drop:
+                - ALL
+            runAsNonRoot: false
+            runAsUser: 0
+          env:
+            - name: PROXY_PORT
+              value: "15123"
+            - name: INBOUND_PROXY_PORT
+              value: "15124"
+            - name: PROXY_UID
+              value: "1337"
+            - name: OUTBOUND_PORTS_EXCLUDE
+              value: "8190"  # Exclude Token Broker port from iptables redirect
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              echo "Setting up iptables for AuthBridge transparent proxy..."
+              
+              # Exclude AuthBridge/Envoy's own traffic (UID 1337) - MUST BE FIRST
+              iptables -t nat -A OUTPUT -m owner --uid-owner ${PROXY_UID} -j RETURN
+              
+              # Exclude localhost (Agent ↔ Envoy communication)
+              iptables -t nat -A OUTPUT -d 127.0.0.1/32 -j RETURN
+              iptables -t nat -A OUTPUT -s 127.0.0.1/32 -j RETURN
+              
+              # Exclude specific outbound ports (e.g., Token Broker)
+              if [ -n "${OUTBOUND_PORTS_EXCLUDE}" ]; then
+                for port in $(echo ${OUTBOUND_PORTS_EXCLUDE} | tr ',' ' '); do
+                  echo "Excluding outbound port: $port"
+                  iptables -t nat -A OUTPUT -p tcp --dport $port -j RETURN
+                done
+              fi
+              
+              # Redirect outbound traffic to Envoy outbound listener (15123)
+              iptables -t nat -A OUTPUT -p tcp -j REDIRECT --to-port ${PROXY_PORT}
+              
+              # Redirect inbound traffic to Envoy inbound listener (15124)
+              iptables -t nat -A PREROUTING -p tcp -j REDIRECT --to-port ${INBOUND_PROXY_PORT}
+              
+              echo "iptables rules configured successfully"
+              iptables -t nat -L -n -v
+          resources:
+            limits:
+              cpu: 10m
+              memory: 10Mi
+            requests:
+              cpu: 10m
+              memory: 10Mi
+
+      containers:
+        # AuthBridge Sidecar (includes Envoy + AuthBridge in one container)
+        - name: authbridge
+          image: localhost/kagenti/authbridge:demo
+          imagePullPolicy: Never  # Use local image from Kind
+          args:
+            - "--mode=envoy-sidecar"
+            - "--config=/etc/authbridge/config.yaml"
+          securityContext:
+            runAsUser: 1337
+            runAsGroup: 1337
+          env:
+            - name: LOG_LEVEL
+              value: "info"
+            - name: LOG_FORMAT
+              value: "json"
+          ports:
+            - containerPort: 9901
+              name: admin
+              protocol: TCP
+            - containerPort: 15123
+              name: outbound
+              protocol: TCP
+            - containerPort: 15124
+              name: inbound
+              protocol: TCP
+            - containerPort: 9090
+              name: ext-proc
+              protocol: TCP
+          volumeMounts:
+            - name: envoy-config
+              mountPath: /etc/envoy
+              readOnly: true
+            - name: authbridge-config
+              mountPath: /etc/authbridge
+              readOnly: true
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "150m"
+            limits:
+              memory: "768Mi"
+              cpu: "700m"
+
+        # AI Agent Container
+        - name: aiagent
+          image: localhost/kagenti/mcp-server:demo
+          imagePullPolicy: Never  # Use local image from Kind
+          command: ["/aiagent"]
+          ports:
+            - containerPort: 8186
+              name: http
+              protocol: TCP
+          env:
+            - name: AIAGENT_PORT
+              value: "8186"
+            - name: AIAGENT_MCP_SERVER_URL
+              value: "http://mcp-server-service:8184/mcp"
+          volumeMounts:
+            - name: aiagent-config
+              mountPath: /config
+              readOnly: true
+            - name: shared-data
+              mountPath: /shared
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "200m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+
+      volumes:
+        - name: envoy-config
+          configMap:
+            name: envoy-config
+        - name: authbridge-config
+          configMap:
+            name: authbridge-config
+        - name: aiagent-config
+          configMap:
+            name: aiagent-config
+        - name: shared-data
+          emptyDir: {}
+
+---
+# AuthBridge ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: authbridge-config
+  namespace: kagenti-envoy-demo
+  labels:
+    app: authbridge
+data:
+  config.yaml: |
+    # AuthBridge Configuration for Envoy Sidecar Mode
+    mode: envoy-sidecar
+    
+    # Inbound JWT validation (disabled for demo - no Backend JWT yet)
+    inbound:
+      jwks_url: "https://example.com/.well-known/jwks.json"
+      issuer: "https://example.com"
+    
+    # Outbound token exchange
+    outbound:
+      # Not used for broker routes
+      token_url: "https://example.com/token"
+      default_policy: "passthrough"
+    
+    # Identity (not used for broker routes)
+    identity:
+      type: "client-secret"
+      client_id: "authbridge"
+      client_secret: "unused"
+    
+    # Listener configuration
+    listener:
+      ext_proc_addr: "0.0.0.0:9090"
+    
+    # Bypass paths - allow all inbound traffic for demo
+    bypass:
+      inbound_paths:
+        - "/*"
+    
+    # Routes configuration
+    routes:
+      rules:
+        # Broker route for MCP server
+        - host: "mcp-server-service"
+          action: "broker"
+          token_broker_url: "http://token-broker-service:8190"
+
+        # Wildcard for any MCP server
+        - host: "mcp-*"
+          action: "broker"
+          token_broker_url: "http://token-broker-service:8190"
+
+---
+# AI Agent ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aiagent-config
+  namespace: kagenti-envoy-demo
+  labels:
+    app: aiagent
+data:
+  aiagent-config.yaml: |
+    # AI Agent Configuration for Kubernetes with Envoy Sidecar
+    port: 8186
+    # Sidecar mode: AI Agent sends directly to MCP server, Envoy intercepts via iptables
+    use_sidecar: true
+    # MCP Server URL - traffic will be intercepted by Envoy transparently
+    mcp_server_url: "http://mcp-server-service:8184/mcp"
+
+# Made with Bob

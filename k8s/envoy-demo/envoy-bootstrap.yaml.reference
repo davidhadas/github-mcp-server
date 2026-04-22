@@ -1,0 +1,210 @@
+# Envoy Bootstrap Configuration for Kagenti AuthBridge Sidecar
+# This configuration implements transparent proxying with ext_authz for MCP OAuth token injection.
+#
+# Architecture:
+# - Inbound listener (15006): Backend → Agent (transparent, no auth)
+# - Outbound listener (15001): Agent → MCP Server (ext_authz for token injection)
+# - Token Broker cluster: Shared service for token management
+# - MCP Server cluster: Target MCP server requiring OAuth tokens
+
+admin:
+  address:
+    socket_address:
+      address: 127.0.0.1
+      port_value: 15000
+
+static_resources:
+  listeners:
+    # ============================================================================
+    # INBOUND LISTENER: Backend → Agent (Transparent Proxy)
+    # ============================================================================
+    # This listener receives traffic from the Backend destined for the AI Agent.
+    # It transparently forwards requests without any authentication or modification.
+    # The Agent listens on 127.0.0.1:8186 inside the pod.
+    - name: inbound
+      address:
+        socket_address:
+          address: 0.0.0.0
+          port_value: 15006
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: inbound
+                codec_type: AUTO
+                route_config:
+                  name: local_agent
+                  virtual_hosts:
+                    - name: agent
+                      domains: ["*"]
+                      routes:
+                        - match:
+                            prefix: "/"
+                          route:
+                            cluster: local_agent
+                http_filters:
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+    # ============================================================================
+    # OUTBOUND LISTENER: Agent → MCP Server (ext_authz for Token Injection)
+    # ============================================================================
+    # This listener intercepts outbound traffic from the Agent to MCP servers.
+    # For MCP server routes, it calls the Token Broker via ext_authz to obtain
+    # and inject OAuth tokens. Non-MCP traffic passes through transparently.
+    - name: outbound
+      address:
+        socket_address:
+          address: 0.0.0.0
+          port_value: 15001
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: outbound
+                codec_type: AUTO
+                route_config:
+                  name: outbound_routes
+                  virtual_hosts:
+                    # MCP Server Routes - ext_authz enabled
+                    - name: mcp_servers
+                      domains:
+                        - "mcp-server-service"
+                        - "mcp-server-service:8184"
+                        - "mcp-server-service.kagenti-envoy-demo.svc.cluster.local"
+                        - "mcp-server-service.kagenti-envoy-demo.svc.cluster.local:8184"
+                      # Inject X-Mcp-Server-Url header into upstream request
+                      request_headers_to_add:
+                        - header:
+                            key: "X-Mcp-Server-Url"
+                            value: "http://mcp-server-service:8184"
+                          append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                      routes:
+                        - match:
+                            prefix: "/"
+                          route:
+                            cluster: mcp_server_1
+                    
+                    # Passthrough for non-MCP traffic (no ext_authz)
+                    - name: passthrough
+                      domains: ["*"]
+                      routes:
+                        - match:
+                            prefix: "/"
+                          route:
+                            cluster: original_dst
+                          # Disable ext_authz for passthrough traffic
+                          typed_per_filter_config:
+                            envoy.filters.http.ext_authz:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute
+                              disabled: true
+
+                http_filters:
+                  # ext_authz filter - calls Token Broker for OAuth tokens
+                  - name: envoy.filters.http.ext_authz
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
+                      transport_api_version: V3
+                      failure_mode_allow: false
+                      
+                      # HTTP service configuration
+                      http_service:
+                        server_uri:
+                          uri: "http://token-broker-service:8190"
+                          cluster: token_broker
+                          timeout: 300s
+                        
+                        # All ext_authz checks go to /ext_authz endpoint
+                        path_prefix: "/ext_authz"
+                        
+                        # Forward these headers to Token Broker
+                        authorization_request:
+                          allowed_headers:
+                            patterns:
+                              - prefix: "x-oauth-session"
+                              - prefix: "x-user"
+                          # Inject X-Mcp-Server-Url into ext_authz check request
+                          # (route-level request_headers_to_add only applies to upstream, not ext_authz)
+                          headers_to_add:
+                            - key: "X-Mcp-Server-Url"
+                              value: "http://mcp-server-service:8184"
+                        
+                        # Inject Authorization header from Token Broker response
+                        authorization_response:
+                          allowed_upstream_headers:
+                            patterns:
+                              - exact: "authorization"
+                  
+                  # Router filter (must be last)
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+  clusters:
+    # ============================================================================
+    # LOCAL AGENT CLUSTER
+    # ============================================================================
+    # The AI Agent running in the same pod on 127.0.0.1:8186
+    - name: local_agent
+      type: STATIC
+      connect_timeout: 5s
+      load_assignment:
+        cluster_name: local_agent
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: 127.0.0.1
+                      port_value: 8186
+
+    # ============================================================================
+    # TOKEN BROKER CLUSTER
+    # ============================================================================
+    # The Token Broker service for OAuth token management
+    - name: token_broker
+      type: STRICT_DNS
+      connect_timeout: 5s
+      dns_lookup_family: V4_ONLY
+      load_assignment:
+        cluster_name: token_broker
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: token-broker-service
+                      port_value: 8190
+
+    # ============================================================================
+    # MCP SERVER CLUSTER
+    # ============================================================================
+    # The MCP server requiring OAuth authentication
+    # Service port 8184 maps to container port 8082
+    - name: mcp_server_1
+      type: STRICT_DNS
+      connect_timeout: 5s
+      dns_lookup_family: V4_ONLY
+      load_assignment:
+        cluster_name: mcp_server_1
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: mcp-server-service
+                      port_value: 8184
+
+    # ============================================================================
+    # ORIGINAL DESTINATION CLUSTER
+    # ============================================================================
+    # For transparent proxying of non-MCP traffic
+    - name: original_dst
+      type: ORIGINAL_DST
+      connect_timeout: 5s
+      lb_policy: CLUSTER_PROVIDED
+
+# Made with Bob

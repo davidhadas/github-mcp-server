@@ -28,23 +28,8 @@ var (
 var agentLogger *slog.Logger
 
 func init() {
-	// Use environment variable for log path, default to /var/log/aiagent.log
-	// If that fails, fall back to stdout
-	logPath := os.Getenv("AIAGENT_LOG_PATH")
-	if logPath == "" {
-		logPath = "/var/log/aiagent.log"
-	}
-
-	var logWriter io.Writer = os.Stdout
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
-	if err != nil {
-		// Fall back to stdout if file creation fails
-		fmt.Fprintf(os.Stderr, "Warning: Failed to open aiagent log file %s: %v, using stdout\n", logPath, err)
-	} else {
-		logWriter = logFile
-	}
-
-	agentLogger = slog.New(slog.NewTextHandler(logWriter, &slog.HandlerOptions{
+	// Log to stdout for Kubernetes (like backend does)
+	agentLogger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	}))
 }
@@ -97,9 +82,10 @@ func NewAIAgent(mcpServerURL string) *AIAgent {
 func (agent *AIAgent) HandleTask(w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
 
-	// Extract user ID and resume key from headers (set by sidecar)
+	// Extract headers set by Backend/sidecar
 	userIDFromHeader := r.Header.Get("X-User-ID")
 	resumeKey := r.Header.Get("X-Authbridge-Resume")
+	oauthSessionKey := r.Header.Get("X-OAuth-Session-Key")
 
 	var taskReq TaskRequest
 	if err := json.NewDecoder(r.Body).Decode(&taskReq); err != nil {
@@ -117,35 +103,48 @@ func (agent *AIAgent) HandleTask(w http.ResponseWriter, r *http.Request) {
 		"user_id", taskReq.UserID,
 		"user_id_from_header", userIDFromHeader,
 		"resume_key", resumeKey,
+		"oauth_session_key", oauthSessionKey,
 		"task", taskReq.Task,
 		"has_oauth_code", taskReq.OAuthCode != "")
 
-	// Convert task to MCP request
-	mcpReq := agent.taskToMCPRequest(taskReq)
-	agentLogger.Info("Task converted to MCP request",
-		"method", mcpReq.Method,
-		"params", mcpReq.Params)
+	var (
+		taskResp *TaskResponse
+		err      error
+	)
 
-	// Make MCP request directly to MCP server (sidecar will intercept)
-	agentLogger.Info("Sending MCP request to MCP server (sidecar will intercept)",
-		"url", agent.mcpServerURL,
-		"user_id", mcpReq.UserID,
-		"resume_key", resumeKey,
-		"method", mcpReq.Method)
+	if agent.isRepositoryTask(taskReq) {
+		taskResp, err = agent.handleListRepositoriesTask(taskReq, resumeKey, oauthSessionKey, startTime)
+	} else {
+		// Convert task to MCP request
+		mcpReq := agent.taskToMCPRequest(taskReq)
+		agentLogger.Info("Task converted to MCP request",
+			"method", mcpReq.Method,
+			"params", mcpReq.Params)
 
-	mcpResp, err := agent.makeMCPRequestWithOAuth(mcpReq, resumeKey, taskReq.OAuthCode, taskReq.CodeVerifier, taskReq.MCPServerURL)
+		// Make MCP request directly to MCP server (sidecar will intercept)
+		agentLogger.Info("Sending MCP request to MCP server (sidecar will intercept)",
+			"url", agent.mcpServerURL,
+			"user_id", mcpReq.UserID,
+			"resume_key", resumeKey,
+			"method", mcpReq.Method)
+
+		var mcpResp *MCPResponse
+		mcpResp, err = agent.makeMCPRequestWithOAuth(mcpReq, resumeKey, oauthSessionKey, taskReq.OAuthCode, taskReq.CodeVerifier, taskReq.MCPServerURL)
+		if err == nil {
+			agentLogger.Info("Received response from AuthBridge proxy",
+				"status", mcpResp.Status,
+				"user_id", taskReq.UserID)
+
+			// Convert MCP response to task result
+			taskResp = agent.mcpResponseToTaskResult(mcpResp, taskReq, mcpReq, startTime)
+		}
+	}
+
 	if err != nil {
 		agentLogger.Error("MCP request failed", "error", err.Error())
 		http.Error(w, fmt.Sprintf("MCP request failed: %v", err), http.StatusInternalServerError)
 		return
 	}
-
-	agentLogger.Info("Received response from AuthBridge proxy",
-		"status", mcpResp.Status,
-		"user_id", taskReq.UserID)
-
-	// Convert MCP response to task result
-	taskResp := agent.mcpResponseToTaskResult(mcpResp, taskReq, mcpReq, startTime)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(taskResp)
@@ -172,15 +171,14 @@ func (agent *AIAgent) taskToMCPRequest(task TaskRequest) MCPRequest {
 	if toolName == "" {
 		// Check for repository-related tasks first (more specific)
 		if strings.Contains(taskLower, "repo") || strings.Contains(taskLower, "repositories") {
-			// Use the correct tool name from GitHub MCP server
 			toolName = "search_repositories"
-			// Add required query parameter using GitHub search syntax
-			// user:@me searches for repos owned by the authenticated user
 			if toolArguments == nil {
 				toolArguments = map[string]interface{}{}
 			}
-			toolArguments["query"] = "mcp"
-			agentLogger.Info("Repository task detected - using search_repositories with query 'user:@me'")
+			if _, exists := toolArguments["query"]; !exists {
+				toolArguments["query"] = "mcp"
+			}
+			agentLogger.Info("Repository task detected - using search_repositories", "query", toolArguments["query"])
 		} else if strings.Contains(taskLower, "list") && (strings.Contains(taskLower, "tool") || strings.Contains(taskLower, "available")) {
 			// List tools
 			method = "tools/list"
@@ -221,10 +219,152 @@ func (agent *AIAgent) taskToMCPRequest(task TaskRequest) MCPRequest {
 	}
 }
 
+func (agent *AIAgent) isRepositoryTask(task TaskRequest) bool {
+	taskLower := strings.ToLower(task.Task)
+	return strings.Contains(taskLower, "repo") || strings.Contains(taskLower, "repositories")
+}
+
+func (agent *AIAgent) handleListRepositoriesTask(taskReq TaskRequest, resumeKey, oauthSessionKey string, startTime time.Time) (*TaskResponse, error) {
+	getMeReq := MCPRequest{
+		UserID:       taskReq.UserID,
+		MCPServerURL: agent.mcpServerURL,
+		Method:       "tools/call",
+		Params: map[string]interface{}{
+			"name":      "get_me",
+			"arguments": map[string]interface{}{},
+		},
+	}
+
+	agentLogger.Info("Resolving authenticated GitHub user before listing repositories",
+		"user_id", taskReq.UserID,
+		"resume_key", resumeKey)
+
+	getMeResp, err := agent.makeMCPRequestWithOAuth(getMeReq, resumeKey, oauthSessionKey, taskReq.OAuthCode, taskReq.CodeVerifier, taskReq.MCPServerURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve authenticated user: %w", err)
+	}
+	if getMeResp.Status != http.StatusOK {
+		return agent.mcpResponseToTaskResult(getMeResp, taskReq, getMeReq, startTime), nil
+	}
+
+	rawProfile, err := parseSSEResponse(getMeResp.Body)
+	if err != nil {
+		if jsonErr := json.Unmarshal(getMeResp.Body, &rawProfile); jsonErr != nil {
+			return nil, fmt.Errorf("failed to parse get_me response: %w", err)
+		}
+	}
+
+	actualProfile := extractMCPContent(rawProfile)
+	profileMap, ok := actualProfile.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("get_me response did not contain a user object")
+	}
+
+	loginValue, ok := profileMap["login"].(string)
+	if !ok || loginValue == "" {
+		return nil, fmt.Errorf("get_me response did not include login")
+	}
+
+	repoReq := MCPRequest{
+		UserID:       taskReq.UserID,
+		MCPServerURL: agent.mcpServerURL,
+		Method:       "tools/call",
+		Params: map[string]interface{}{
+			"name": "search_repositories",
+			"arguments": map[string]interface{}{
+				"query": fmt.Sprintf("user:%s", loginValue),
+			},
+		},
+	}
+
+	agentLogger.Info("Listing repositories scoped to authenticated user",
+		"user_id", taskReq.UserID,
+		"github_login", loginValue,
+		"query", fmt.Sprintf("user:%s", loginValue))
+
+	repoResp, err := agent.makeMCPRequestWithOAuth(repoReq, resumeKey, oauthSessionKey, taskReq.OAuthCode, taskReq.CodeVerifier, taskReq.MCPServerURL)
+	if err != nil {
+		return nil, err
+	}
+
+	agentLogger.Info("Received repository search response from AuthBridge proxy",
+		"status", repoResp.Status,
+		"user_id", taskReq.UserID,
+		"github_login", loginValue)
+
+	// Parse the response to check for 422 validation errors
+	if repoResp.Status == http.StatusOK {
+		// Try to parse the response to detect MCP errors
+		rawResult, parseErr := parseSSEResponse(repoResp.Body)
+		if parseErr != nil {
+			// Fallback to plain JSON parsing
+			if jsonErr := json.Unmarshal(repoResp.Body, &rawResult); jsonErr != nil {
+				// If we can't parse, continue with normal error handling
+				agentLogger.Warn("Failed to parse response for error detection",
+					"parse_error", parseErr.Error(),
+					"json_error", jsonErr.Error())
+			}
+		}
+
+		// Check if this is an MCP error response with 422 validation failure
+		if rawResult != nil {
+			if resultMap, ok := rawResult.(map[string]interface{}); ok {
+				if content, hasContent := resultMap["content"].([]interface{}); hasContent && len(content) > 0 {
+					if firstContent, ok := content[0].(map[string]interface{}); ok {
+						if isError, hasError := resultMap["isError"].(bool); hasError && isError {
+							if text, hasText := firstContent["text"].(string); hasText {
+								// Check if this is a 422 validation error for user search
+								if strings.Contains(text, "422") && strings.Contains(text, "Validation Failed") &&
+									(strings.Contains(text, "cannot be searched") || strings.Contains(text, "do not exist")) {
+									agentLogger.Info("User has no repositories (422 validation error in MCP response)",
+										"user_id", taskReq.UserID,
+										"github_login", loginValue)
+
+									executionTime := time.Since(startTime).Milliseconds()
+									return &TaskResponse{
+										Status:  "success",
+										Message: "No repositories found for the authenticated user",
+										Result: map[string]interface{}{
+											"session_id":        taskReq.UserID,
+											"task_description":  taskReq.Task,
+											"executed_by_user":  taskReq.UserID,
+											"mcp_method":        repoReq.Method,
+											"mcp_tool":          "search_repositories",
+											"execution_time_ms": executionTime,
+											"github_user":       loginValue,
+											"repository_query":  fmt.Sprintf("user:%s", loginValue),
+											"data": map[string]interface{}{
+												"total_count":  0,
+												"repositories": []interface{}{},
+												"count":        0,
+												"message":      "No repositories found for the authenticated user",
+											},
+										},
+									}, nil
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	taskResp := agent.mcpResponseToTaskResult(repoResp, taskReq, repoReq, startTime)
+	if taskResp.Status == "success" {
+		if resultMap, ok := taskResp.Result.(map[string]interface{}); ok {
+			resultMap["github_user"] = loginValue
+			resultMap["repository_query"] = fmt.Sprintf("user:%s", loginValue)
+		}
+	}
+
+	return taskResp, nil
+}
+
 // makeMCPRequestWithOAuth sends an MCP JSON-RPC request directly to MCP server
 // The sidecar will transparently intercept this request via iptables
 // If OAuth parameters are provided, they are passed as headers for the sidecar to detect
-func (agent *AIAgent) makeMCPRequestWithOAuth(mcpReq MCPRequest, resumeKey, oauthCode, codeVerifier, mcpServerURL string) (*MCPResponse, error) {
+func (agent *AIAgent) makeMCPRequestWithOAuth(mcpReq MCPRequest, resumeKey, oauthSessionKey, oauthCode, codeVerifier, mcpServerURL string) (*MCPResponse, error) {
 	// Send raw MCP JSON-RPC request directly to MCP server
 	mcpJSONRPC := map[string]interface{}{
 		"jsonrpc": "2.0",
@@ -251,7 +391,12 @@ func (agent *AIAgent) makeMCPRequestWithOAuth(mcpReq MCPRequest, resumeKey, oaut
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "application/json, text/event-stream") // MCP server requires both
-	httpReq.Header.Set("X-User-ID", mcpReq.UserID)                      // Sidecar will use this for OAuth
+	httpReq.Header.Set("X-User-ID", mcpReq.UserID)
+
+	// Propagate OAuth session key for Envoy ext_authz → Token Broker
+	if oauthSessionKey != "" {
+		httpReq.Header.Set("X-OAuth-Session-Key", oauthSessionKey)
+	}
 
 	// Pass resume key for correlation (REQUIRED for OAuth flow)
 	if resumeKey != "" {
@@ -571,21 +716,52 @@ func (agent *AIAgent) formatRepositoriesList(rawResult interface{}) interface{} 
 				}
 			}
 
-			return map[string]interface{}{
+			result := map[string]interface{}{
 				"total_count":  resultMap["total_count"],
 				"repositories": formattedRepos,
 				"count":        len(formattedRepos),
 			}
+
+			// Add message for empty list
+			if len(formattedRepos) == 0 {
+				result["message"] = "No repositories found"
+			}
+
+			return result
 		}
 	}
 
-	// Check if result is an array of repositories (fallback)
+	// Check if result is an array of repositories (list_repositories format)
 	if resultArray, ok := actualData.([]interface{}); ok {
-		formatted := map[string]interface{}{
-			"repositories": resultArray,
-			"count":        len(resultArray),
+		// Format each repository with key fields only
+		formattedRepos := make([]map[string]interface{}, 0, len(resultArray))
+		for _, item := range resultArray {
+			if repo, ok := item.(map[string]interface{}); ok {
+				formatted := map[string]interface{}{
+					"name":        repo["name"],
+					"full_name":   repo["full_name"],
+					"description": repo["description"],
+					"html_url":    repo["html_url"],
+					"language":    repo["language"],
+					"stars":       repo["stargazers_count"],
+					"forks":       repo["forks_count"],
+					"private":     repo["private"],
+				}
+				formattedRepos = append(formattedRepos, formatted)
+			}
 		}
-		return formatted
+
+		result := map[string]interface{}{
+			"repositories": formattedRepos,
+			"count":        len(formattedRepos),
+		}
+
+		// Add message for empty list
+		if len(formattedRepos) == 0 {
+			result["message"] = "No repositories found for the authenticated user"
+		}
+
+		return result
 	}
 
 	return rawResult
@@ -623,22 +799,9 @@ func main() {
 
 	agent := NewAIAgent(mcpServerURL)
 
-	// Setup HTTP server with separate access log
-	accessLogPath := os.Getenv("AIAGENT_ACCESS_LOG_PATH")
-	if accessLogPath == "" {
-		accessLogPath = "/var/log/aiagent-access.log"
-	}
-
-	var accessLogWriter io.Writer = os.Stdout
-	accessLog, err := os.OpenFile(accessLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
-	if err != nil {
-		agentLogger.Warn("Failed to open access log file, using stdout", "error", err, "path", accessLogPath)
-	} else {
-		accessLogWriter = accessLog
-	}
-
+	// Setup HTTP server with access log to stdout (like backend does)
 	r := chi.NewRouter()
-	r.Use(middleware.RequestLogger(&middleware.DefaultLogFormatter{Logger: log.New(accessLogWriter, "", log.LstdFlags)}))
+	r.Use(middleware.RequestLogger(&middleware.DefaultLogFormatter{Logger: log.New(os.Stdout, "", log.LstdFlags)}))
 	r.Use(middleware.Recoverer)
 
 	// Task endpoint

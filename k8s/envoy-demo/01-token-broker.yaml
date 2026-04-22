@@ -1,0 +1,69 @@
+# Token Broker Deployment and Service
+# The Token Broker is a shared service that manages OAuth sessions and token caching
+# for all AI agents in the cluster.
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: token-broker-service
+  namespace: kagenti-envoy-demo
+  labels:
+    app: token-broker
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8190
+      targetPort: 8190
+      protocol: TCP
+      name: http
+  selector:
+    app: token-broker
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: token-broker
+  namespace: kagenti-envoy-demo
+  labels:
+    app: token-broker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: token-broker
+  template:
+    metadata:
+      labels:
+        app: token-broker
+    spec:
+      containers:
+        - name: token-broker
+          image: localhost/kagenti/mcp-server:demo
+          imagePullPolicy: Never  # Use local image from Kind
+          command: ["/token-broker"]
+          ports:
+            - containerPort: 8190
+              name: http
+              protocol: TCP
+          env:
+            - name: TOKEN_BROKER_PORT
+              value: "8190"
+            - name: TOKEN_BROKER_CALLBACK_URL
+              value: "http://localhost:8187/callback"
+            - name: TOKEN_BROKER_SESSION_TIMEOUT
+              value: "60s"
+            - name: TOKEN_BROKER_MAX_SESSIONS_PER_USER
+              value: "5"
+            - name: TOKEN_BROKER_TOKEN_WAIT_TIMEOUT
+              value: "300s"
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+
+# Made with Bob

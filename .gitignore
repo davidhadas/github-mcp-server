@@ -35,4 +35,4 @@ ui/node_modules/
 # Embedded UI assets (built from ui/)
 pkg/github/ui_dist/*
 !pkg/github/ui_dist/.gitkeep
-!pkg/github/ui_dist/.placeholder.html
+!pkg/github/ui_dist/.placeholder.htmlkagenti-extensions/

@@ -1,0 +1,11 @@
+# Namespace for Envoy-based Kagenti Demo
+# This is a separate namespace from the existing kagenti-demo to allow parallel testing
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kagenti-envoy-demo
+  labels:
+    app: kagenti
+    demo: envoy
+
+# Made with Bob

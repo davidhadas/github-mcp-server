@@ -1,0 +1,77 @@
+# MCP Server Deployment and Service
+# This is the GitHub MCP server that requires OAuth authentication.
+# It listens on container port 8082 and is exposed via service port 8184.
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-server-service
+  namespace: kagenti-envoy-demo
+  labels:
+    app: mcp-server
+spec:
+  type: NodePort
+  ports:
+    - port: 8184
+      targetPort: 8082
+      nodePort: 30184
+      protocol: TCP
+      name: http
+  selector:
+    app: mcp-server
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-server
+  namespace: kagenti-envoy-demo
+  labels:
+    app: mcp-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mcp-server
+  template:
+    metadata:
+      labels:
+        app: mcp-server
+    spec:
+      containers:
+        - name: mcp-server
+          image: localhost/kagenti/mcp-server:demo
+          imagePullPolicy: Never  # Use local image from Kind
+          command: ["/github-mcp-server"]
+          args:
+            - "http"
+            - "--port=8082"
+            - "--oauth-client-id=$(GITHUB_OAUTH_CLIENT_ID)"
+            - "--oauth-client-secret=$(GITHUB_OAUTH_CLIENT_SECRET)"
+            - "--oauth-redirect-uri=http://localhost:8187/callback"
+            - "--oauth-scopes=repo,read:org,read:user,user:email"
+          ports:
+            - containerPort: 8082
+              name: http
+              protocol: TCP
+          env:
+            - name: GITHUB_OAUTH_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: mcp-oauth-credentials
+                  key: client-id
+            - name: GITHUB_OAUTH_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: mcp-oauth-credentials
+                  key: client-secret
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+
+# Made with Bob

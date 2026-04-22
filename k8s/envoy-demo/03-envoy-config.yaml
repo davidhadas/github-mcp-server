@@ -1,0 +1,253 @@
+# Envoy Configuration ConfigMap
+# This ConfigMap contains the Envoy bootstrap configuration that will be mounted
+# into the Envoy sidecar container.
+# Based on kagenti-extensions AuthBridge configuration using ext_proc
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: envoy-config
+  namespace: kagenti-envoy-demo
+  labels:
+    app: envoy
+data:
+  envoy.yaml: |
+    # Envoy Bootstrap Configuration for Kagenti AuthBridge Sidecar
+    # This configuration implements transparent proxying with ext_proc for MCP OAuth token injection.
+    #
+    # Architecture:
+    # - Inbound listener (15124): Backend → Agent (ext_proc for JWT validation)
+    # - Outbound listener (15123): Agent → MCP Server (ext_proc for token exchange)
+    # - AuthBridge ext_proc: Handles both inbound JWT validation and outbound token exchange
+    # - Original destination cluster: For transparent proxying
+
+    admin:
+      address:
+        socket_address:
+          protocol: TCP
+          address: 127.0.0.1
+          port_value: 9901
+
+    static_resources:
+      listeners:
+        # ============================================================================
+        # OUTBOUND LISTENER: Agent → MCP Server (ext_proc for Token Exchange)
+        # ============================================================================
+        # This listener intercepts outbound traffic from the Agent to MCP servers.
+        # Uses ext_proc to call AuthBridge for token exchange.
+        # Supports both HTTP (with token exchange) and HTTPS (TLS passthrough).
+        - name: outbound_listener
+          address:
+            socket_address:
+              protocol: TCP
+              address: 0.0.0.0
+              port_value: 15123
+          listener_filters:
+            - name: envoy.filters.listener.original_dst
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.listener.original_dst.v3.OriginalDst
+            - name: envoy.filters.listener.tls_inspector
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.listener.tls_inspector.v3.TlsInspector
+          filter_chains:
+            # TLS passthrough: forward HTTPS traffic as-is via TCP proxy
+            - filter_chain_match:
+                transport_protocol: tls
+              filters:
+                - name: envoy.filters.network.tcp_proxy
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
+                    stat_prefix: outbound_tls_passthrough
+                    cluster: original_destination
+            # Plaintext HTTP: inspect and process via ext_proc
+            - filter_chain_match:
+                transport_protocol: raw_buffer
+              filters:
+                - name: envoy.filters.network.http_connection_manager
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                    stat_prefix: outbound_http
+                    codec_type: AUTO
+                    route_config:
+                      name: outbound_routes
+                      virtual_hosts:
+                        - name: catch_all
+                          domains: ["*"]
+                          routes:
+                            - match:
+                                prefix: "/"
+                              route:
+                                cluster: original_destination
+                                timeout: 0s  # Disable timeout (infinite) to support long OAuth flows
+                                idle_timeout: 610s  # 10 minutes + buffer for user OAuth completion
+                    http_filters:
+                      # Add direction header for AuthBridge to distinguish outbound traffic
+                      - name: envoy.filters.http.lua
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+                          inline_code: |
+                            function envoy_on_request(request_handle)
+                              request_handle:headers():add("x-authbridge-direction", "outbound")
+                            end
+                      - name: envoy.filters.http.ext_proc
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor
+                          grpc_service:
+                            envoy_grpc:
+                              cluster_name: authbridge_cluster
+                            timeout: 310s  # gRPC connection timeout (5 minutes + buffer)
+                          message_timeout: 310s  # Timeout for ext_proc processing (5 minutes + buffer for Token Broker OAuth wait)
+                          processing_mode:
+                            request_header_mode: SEND
+                            response_header_mode: SKIP
+                            request_body_mode: NONE
+                            response_body_mode: NONE
+                      - name: envoy.filters.http.router
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+        # ============================================================================
+        # INBOUND LISTENER: Backend → Agent (ext_proc for JWT Validation)
+        # ============================================================================
+        # This listener receives traffic from the Backend destined for the AI Agent.
+        # Uses ext_proc to call AuthBridge for JWT validation.
+        - name: inbound_listener
+          address:
+            socket_address:
+              protocol: TCP
+              address: 0.0.0.0
+              port_value: 15124
+          listener_filters:
+            - name: envoy.filters.listener.original_dst
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.listener.original_dst.v3.OriginalDst
+          filter_chains:
+            - filters:
+                - name: envoy.filters.network.http_connection_manager
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                    stat_prefix: inbound_http
+                    codec_type: AUTO
+                    route_config:
+                      name: inbound_routes
+                      virtual_hosts:
+                        - name: local_app
+                          domains: ["*"]
+                          routes:
+                            - match:
+                                prefix: "/"
+                              route:
+                                cluster: local_agent
+                    http_filters:
+                      # Add direction header for AuthBridge to distinguish inbound vs outbound
+                      - name: envoy.filters.http.lua
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+                          inline_code: |
+                            function envoy_on_request(request_handle)
+                              request_handle:headers():add("x-authbridge-direction", "inbound")
+                            end
+                      - name: envoy.filters.http.ext_proc
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor
+                          grpc_service:
+                            envoy_grpc:
+                              cluster_name: authbridge_cluster
+                            timeout: 30s  # gRPC connection timeout
+                          message_timeout: 30s  # Timeout for each processing message (JWT validation is fast)
+                          processing_mode:
+                            request_header_mode: SEND
+                            response_header_mode: SKIP
+                            request_body_mode: NONE
+                            response_body_mode: NONE
+                      - name: envoy.filters.http.router
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+      clusters:
+        # ============================================================================
+        # AUTHBRIDGE CLUSTER - ext_proc gRPC
+        # ============================================================================
+        # The AuthBridge external processor for token exchange and JWT validation
+        # Runs as a sidecar container in the same pod
+        - name: authbridge_cluster
+          connect_timeout: 5s
+          type: STATIC
+          http2_protocol_options: {}
+          lb_policy: ROUND_ROBIN
+          load_assignment:
+            cluster_name: authbridge_cluster
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address:
+                          address: 127.0.0.1
+                          port_value: 9090
+
+        # ============================================================================
+        # TOKEN BROKER CLUSTER
+        # ============================================================================
+        # The Token Broker service for OAuth token management
+        # AuthBridge will use this for token operations
+        - name: token_broker
+          type: STRICT_DNS
+          connect_timeout: 5s
+          dns_lookup_family: V4_ONLY
+          load_assignment:
+            cluster_name: token_broker
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address:
+                          address: token-broker-service
+                          port_value: 8190
+
+        # ============================================================================
+        # MCP SERVER CLUSTER
+        # ============================================================================
+        # The MCP server requiring OAuth authentication
+        # Service port 8184 maps to container port 8082
+        - name: mcp_server_1
+          type: STRICT_DNS
+          connect_timeout: 5s
+          dns_lookup_family: V4_ONLY
+          load_assignment:
+            cluster_name: mcp_server_1
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address:
+                          address: mcp-server-service
+                          port_value: 8184
+
+        # ============================================================================
+        # LOCAL AGENT CLUSTER
+        # ============================================================================
+        # Routes inbound traffic to the AI Agent on localhost
+        - name: local_agent
+          connect_timeout: 5s
+          type: STATIC
+          lb_policy: ROUND_ROBIN
+          load_assignment:
+            cluster_name: local_agent
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address:
+                          address: 127.0.0.1
+                          port_value: 8186
+
+        # ============================================================================
+        # ORIGINAL DESTINATION CLUSTER
+        # ============================================================================
+        # For transparent proxying of outbound traffic - routes to the original destination
+        - name: original_destination
+          connect_timeout: 30s
+          type: ORIGINAL_DST
+          lb_policy: CLUSTER_PROVIDED
+
+# Made with Bob
